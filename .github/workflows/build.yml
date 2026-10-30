@@ -37,6 +37,36 @@ jobs:
           python ci/test_bg.py shots/0_배경제거_시험.png *>&1 | Tee-Object shots/log_배경제거.txt
           if ($LASTEXITCODE -ne 0) { throw "배경 제거 시험 실패" }
 
+      - name: 가벼움 측정 (이전 버전과 비교)
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force shots, old | Out-Null
+          $d = "$env:APPDATA\DesktopPet\pets"
+          New-Item -ItemType Directory -Force $d | Out-Null
+          Copy-Item ci\pets\*.png $d
+          '{"global_scale": 120, "pets": {}, "help_shown": true}' | Set-Content "$env:APPDATA\DesktopPet\settings.json" -Encoding utf8
+          gh release download build-6 -p DesktopPet.exe -D old -R ${{ github.repository }}
+          if (Test-Path old\DesktopPet.exe) { pwsh -File ci/measure.ps1 -exe old\DesktopPet.exe -label "이전 버전" -out shots/측정.txt }
+          pwsh -File ci/measure.ps1 -exe dist\DesktopPet.exe -label "새 버전" -out shots/측정.txt
+
+      - name: 부딪힘 장면 녹화
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force shots | Out-Null
+          Get-Process DesktopPet -ErrorAction SilentlyContinue | Stop-Process -Force
+          Remove-Item "$env:APPDATA\DesktopPet\running.lock" -ErrorAction SilentlyContinue
+          $env:DESKTOPPET_DEMO = "1"
+          $p = Start-Process dist\DesktopPet.exe -PassThru
+          Start-Sleep 22
+          python ci/record.py shots/7_부딪힘.gif 13 "$env:APPDATA\DesktopPet\demo_go"
+          Get-Process DesktopPet -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep 3
+          Remove-Item "$env:APPDATA\DesktopPet\running.lock" -ErrorAction SilentlyContinue
+
       - name: exe 실행 시험 + 화면 캡처
         continue-on-error: true
         shell: pwsh

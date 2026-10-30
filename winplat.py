@@ -114,3 +114,70 @@ def platforms(min_width=60):
         if segs:
             result[hwnd] = [(a, c, t, l) for a, c in segs]
     return result
+
+
+def window_rect(hwnd):
+    """창 하나의 현재 위치 (물리 픽셀). 닫혔거나 최소화/숨김이면 None — 매 프레임 써도 가벼움"""
+    if not IS_WIN:
+        return None
+    try:
+        if not user32.IsWindow(hwnd) or not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+            return None
+        cloaked = wintypes.DWORD(0)
+        if dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, ctypes.byref(cloaked), ctypes.sizeof(cloaked)) == 0 \
+                and cloaked.value:
+            return None
+        return _rect(hwnd)
+    except Exception:
+        return None
+
+
+if IS_WIN:
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+    user32.MonitorFromWindow.restype = wintypes.HANDLE
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+    user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MONITORINFO)]
+
+
+def fullscreen_foreground():
+    """지금 맨 앞 창이 모니터 전체를 덮고 있나 (PPT 발표, 영상 전체화면, 게임 등)"""
+    if not IS_WIN:
+        return False
+    try:
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        buf = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, buf, 64)
+        if buf.value in ("Progman", "WorkerW", "Shell_TrayWnd"):
+            return False                       # 바탕화면 자체는 제외
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == MY_PID:
+            return False
+        r = wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(r))
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        if not user32.GetMonitorInfoW(user32.MonitorFromWindow(hwnd, 2), ctypes.byref(mi)):
+            return False
+        m = mi.rcMonitor
+        return r.left <= m.left and r.top <= m.top and r.right >= m.right and r.bottom >= m.bottom
+    except Exception:
+        return False
+
+
+def lower_priority():
+    """업무 프로그램보다 CPU 순서를 양보 (보통보다 낮은 우선순위)"""
+    if IS_WIN:
+        try:
+            k = ctypes.WinDLL("kernel32")
+            k.SetPriorityClass(k.GetCurrentProcess(), 0x00004000)   # BELOW_NORMAL_PRIORITY_CLASS
+        except Exception:
+            pass

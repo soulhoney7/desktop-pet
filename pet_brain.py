@@ -19,7 +19,12 @@ BEHAVIORS = {
 GROUND_STATES = ("idle", "walk", "run", "sit", "sleep", "hop", "dance", "look", "chase",
                  "to_wall", "meet", "happy", "dizzy", "crouch")
 
-EMOTE = {"heart": "♥", "note": "♪", "z": "z", "q": "?", "ex": "!", "star": "★", "sweat": "💦"}
+EMOTE = {"heart": "♥", "note": "♪", "z": "z", "q": "?", "ex": "!", "star": "★", "sweat": "💦",
+         "bonk": "콩!", "boing": "뿅!", "angry": "💢"}
+
+# 서로 밀어낼 수 있는 상태 / 앞으로 걸어가는 상태
+CONTACT_SKIP = ("drag", "climb", "hang")
+MOVING = ("walk", "run", "chase", "to_wall", "hop")
 
 
 class PetBrain:
@@ -49,6 +54,7 @@ class PetBrain:
         self.target = 0.0
         self.emotes = []            # [글자, 시작시각, 지속, x흔들림]
         self.last_emote = 0.0
+        self.bump_until = 0.0       # 부딪힘 쿨타임 (시각)
         self.strokes = 0
         self.meet_cool = 0.0
         self.partner = None
@@ -83,9 +89,13 @@ class PetBrain:
             self.vx, self.vy = 0.0, 0.0
             self.emote("ex", 0.9)
 
-    def emote(self, kind, dur=1.4):
-        self.emotes.append([EMOTE.get(kind, kind), self.now, dur, self.rng.uniform(-8, 8)])
-        self.last_emote = self.now
+    def emote(self, kind, dur=1.4, dx=None, style="rise"):
+        """style: rise(머리 위로 떠오름) / burst(그 자리에서 별이 톡 터짐)"""
+        if dx is None:
+            dx = self.rng.uniform(-8, 8)
+        self.emotes.append([EMOTE.get(kind, kind), self.now, dur, dx, style])
+        if style == "rise":
+            self.last_emote = self.now
 
     def set_state(self, state, lo=1.0, hi=3.0):
         self.state = state
@@ -510,6 +520,9 @@ class PetBrain:
             if o is self or o.busy() or o.meet_cool > 0 or o.state == "sleep":
                 continue
             if abs(o.cx - self.cx) < (self.w + o.w) / 2 + 10 and abs(o.cy + o.h / 2 - self.cy - self.h / 2) < 5:
+                if self.rng.random() < 0.45:          # 이번엔 인사 안 하고 그냥 콩! 부딪히기
+                    self.meet_cool = o.meet_cool = 8
+                    return
                 for a, bb in ((self, o), (o, self)):
                     a.facing = 1 if bb.cx > a.cx else -1
                     a.flat = 0
@@ -589,3 +602,82 @@ class PetBrain:
             self.dizzy_next = True
         self.state = "air"
         self.log("thrown")
+
+
+# ───────────────────── 펫끼리 부딪히기 ─────────────────────
+def bump(p, away, now, power=1.0, word=None):
+    """away 쪽으로 콩 튕겨 나감"""
+    was_sleeping = p.state == "sleep"
+    p.flat = 0.0
+    p.angle = 0.0
+    p.state = "air"
+    p.log("bump")
+    p.vx = away * p.rng.uniform(2.3, 3.3) * power
+    p.vy = -p.rng.uniform(5.0, 6.5) * power
+    p.spin = away * 4 * power if power > 1.2 else 0.0
+    p.squash = 0.9
+    p.facing = -away                      # 부딪힌 친구를 바라보며 뒤로 콩
+    p.bump_until = now + 2.5
+    if was_sleeping:
+        p.emote("angry", 1.4)             # 자다가 맞으면 💢
+    elif word:
+        p.emote(word, 1.1)
+    if power > 1.3 and p.rng.random() < 0.5:
+        p.dizzy_next = True
+
+
+def burst(p, side, now):
+    """부딪힌 자리에서 반짝이 톡"""
+    p.emote("✦", 0.6, dx=side * p.w * 0.45, style="burst")
+
+
+def resolve_contacts(brains, now):
+    """펫끼리 겹치지 않게 밀어내고, 부딪히면 콩! 효과"""
+    n = len(brains)
+    for i in range(n):
+        a = brains[i]
+        for j in range(i + 1, n):
+            b = brains[j]
+            if a.state in CONTACT_SKIP or b.state in CONTACT_SKIP:
+                continue
+            dx = b.cx - a.cx
+            side = 1 if dx > 0 else -1 if dx < 0 else a.rng.choice([-1, 1])   # b가 a의 어느 쪽에 있나
+            a_air, b_air = a.state == "air", b.state == "air"
+
+            if not a_air and not b_air:
+                # 같은 바닥(화면 바닥 또는 같은 창) 위에 서 있을 때만
+                if a.on != b.on or abs((a.cy + a.h / 2) - (b.cy + b.h / 2)) > 4:
+                    continue
+                overlap = (a.w + b.w) / 2 * 0.8 - abs(dx)
+                if overlap <= 0:
+                    continue
+                a_push = a.state in MOVING and a.facing == side
+                b_push = b.state in MOVING and b.facing == -side
+                if (a_push or b_push) and now > a.bump_until and now > b.bump_until:
+                    power = 1.4 if (a.state == "run" or b.state == "run") else 1.0
+                    first = a if a_push else b
+                    bump(a, -side, now, power, "bonk" if first is a else None)
+                    bump(b, side, now, power, "bonk" if first is b else None)
+                    burst(a, side, now)
+                else:
+                    step = min(overlap / 2, 1.2)  # 살살 밀어내기
+                    a.cx -= side * step
+                    b.cx += side * step
+            else:
+                # 공중에서 날아와 부딪힘 (던졌거나 점프하다가)
+                if abs(dx) > (a.w + b.w) / 2 * 0.7 or abs(b.cy - a.cy) > (a.h + b.h) / 2 * 0.7:
+                    continue
+                if now < a.bump_until or now < b.bump_until:
+                    continue
+                if math.hypot(a.vx - b.vx, a.vy - b.vy) < 6:
+                    continue
+                for p, away in ((a, -side), (b, side)):
+                    if p.state == "air":
+                        p.vx = away * max(2.5, abs(p.vx) * 0.4)
+                        p.vy = min(p.vy, -3.0)
+                        p.spin = away * 6
+                        p.bump_until = now + 1.5
+                        p.emote("boing", 1.0)
+                    else:
+                        bump(p, away, now, 1.5, "ex")
+                burst(a, side, now)

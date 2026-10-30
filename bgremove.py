@@ -142,3 +142,11 @@ def make_pet_image(path, progress=None, max_side=512):
                     min(img.width, xs.max() + 1 + pad), min(img.height, ys.max() + 1 + pad)))
     img.thumbnail((max_side, max_side), Image.LANCZOS)
     return img
+
+
+def release():
+    """모델을 메모리에서 내림 (다음에 사진 넣을 때 다시 불러옴, 1~2초)"""
+    global _session
+    _session = None
+    import gc
+    gc.collect()

@@ -23,7 +23,7 @@ import random
 
 from help_text import HELP_HTML
 import winplat
-from pet_brain import PetBrain
+from pet_brain import PetBrain, resolve_contacts
 
 APP_NAME = "데스크탑 펫"
 DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "DesktopPet"
@@ -34,9 +34,23 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".jfif", ".webp", ".bmp", ".gif", ".tif",
 
 TRACE = bool(os.environ.get("DESKTOPPET_TRACE"))
 BASE_HEIGHT = 110      # 크기 100%일 때 펫 높이(px)
-TICK_MS = 30
+TICK_MS = 33            # 움직일 때 (초당 30번)
+IDLE_TICK_MS = 90       # 다들 가만히 있을 때 (초당 11번) → CPU 절약
+PAUSE_TICK_MS = 1000    # 전체화면/숨김 중
+SCAN_EVERY = 0.4        # 열린 창 목록 전체 검색 간격(초)
+FAST_STATES = ("air", "drag", "walk", "run", "chase", "hop", "dance", "to_wall", "climb", "hang",
+               "crouch", "meet", "happy", "dizzy")
 EMO_SPACE = 56         # 펫 머리 위 이모티콘 공간
 PINK = "#f06292"
+EMO_COLORS = {}
+EMO_FONTS = {}
+
+
+def init_emote_style():
+    EMO_COLORS.update({"♥": QColor(240, 80, 120), "♪": QColor(90, 120, 230), "★": QColor(250, 190, 30),
+                       "!": QColor(235, 70, 60), "?": QColor(80, 140, 230), "z": QColor(120, 120, 160),
+                       "콩!": QColor(255, 105, 150), "뿅!": QColor(160, 110, 240)})
+    EMO_FONTS["small"] = QFont("Segoe UI Symbol", 11, QFont.Bold)
 
 
 # ──────────────────────────── 설정 저장 ────────────────────────────
@@ -109,6 +123,8 @@ class PetWindow(QWidget):
         self.drag_offset = None
         self.drag_hist = []
         self.pw = self.ph = 10
+        self._pos = None
+        self._key = None
 
         prim = QGuiApplication.primaryScreen().availableGeometry()
         self.update_scale(first=True)
@@ -141,14 +157,25 @@ class PetWindow(QWidget):
 
     def place(self):
         x, y = self.visual_center()
-        self.move(int(x - self.width() / 2), int(y - EMO_SPACE - (self.height() - EMO_SPACE) / 2))
+        pos = (int(x - self.width() / 2), int(y - EMO_SPACE - (self.height() - EMO_SPACE) / 2))
+        if pos != self._pos:                 # 위치가 그대로면 창을 건드리지 않음
+            self._pos = pos
+            self.move(*pos)
 
-    def tick(self, now, mouse, others, plats):
+    def think(self, now, mouse, others, plats):
         b = self.brain
         area = screen_area(b.cx, b.cy)
         b.update(now, area, mouse, others, plats)
+
+    def render(self):
+        """바뀐 게 있을 때만 옮기고, 모양이 바뀌었을 때만 다시 그림 (CPU 절약)"""
+        b = self.brain
         self.place()
-        self.update()
+        em = tuple((e[0], int((b.now - e[1]) * 25)) for e in b.emotes)
+        key = (round(b.angle), round(b.squash * 30), round(b.flat_now * 40), b.facing, em, self.pw, self.ph)
+        if key != self._key:
+            self._key = key
+            self.update()
 
     # ── 그리기 ──
     def paintEvent(self, _):
@@ -170,31 +197,43 @@ class PetWindow(QWidget):
         p.drawPixmap(QRectF(-w / 2, -h / 2, w, h), self.pix, QRectF(self.pix.rect()))
         p.restore()
 
-        # 머리 위 이모티콘
+        # 머리 위 이모티콘 / 부딪힘 반짝이
         now = b.now
         head_y = cy - h / 2 - 2 if abs(b.angle) < 45 else cy - w / 2 - 2
-        for text, t0, dur, dx in b.emotes:
+        for text, t0, dur, dx, style in b.emotes:
             k = (now - t0) / dur
             if not 0 <= k <= 1:
                 continue
+            if style == "burst":
+                alpha = int(255 * (1 - k))
+                r = 6 + k * 26
+                p.setFont(EMO_FONTS["small"])
+                for n in range(6):
+                    ang = n * math.pi / 3 + 0.3
+                    col = QColor(255, 196, 40, alpha) if n % 2 else QColor(255, 120, 170, alpha)
+                    p.setPen(col)
+                    p.drawText(QPointF(cx + dx + math.cos(ang) * r - 5, cy + math.sin(ang) * r + 5), "✦")
+                continue
             alpha = int(255 * (1 - max(0, k - 0.6) / 0.4))
+            pop = 1.0
+            if text in ("콩!", "뿅!"):
+                pop = 1.0 + 0.5 * max(0.0, 1 - k * 5)          # 처음에 크게 뿅
             y = head_y - 6 - k * 34
             x = cx + dx + (math.sin(k * 9) * 4 if text in ("z", "♪") else 0)
-            size = 15 if text in ("z",) else 19
-            if text == "z":
-                size = int(12 + k * 8)
-            font = QFont("Segoe UI Emoji" if text == "💦" else "Malgun Gothic", size, QFont.Bold)
+            size = int(12 + k * 8) if text == "z" else int(19 * pop)
+            emoji = text in ("💦", "💢")
+            font = QFont("Segoe UI Emoji" if emoji else "Malgun Gothic", size, QFont.Bold)
             p.setFont(font)
-            color = {"♥": QColor(240, 80, 120), "♪": QColor(90, 120, 230), "★": QColor(250, 190, 30),
-                     "!": QColor(235, 70, 60), "?": QColor(80, 140, 230), "z": QColor(120, 120, 160)}.get(
-                text, QColor(80, 160, 230))
+            half = p.fontMetrics().horizontalAdvance(text) / 2
+            color = EMO_COLORS.get(text, QColor(80, 160, 230))
+            color = QColor(color)
             # 흰 테두리
             p.setPen(QColor(255, 255, 255, alpha))
             for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                p.drawText(QPointF(x - size / 2 + ox, y + oy), text)
+                p.drawText(QPointF(x - half + ox, y + oy), text)
             color.setAlpha(alpha)
             p.setPen(color)
-            p.drawText(QPointF(x - size / 2, y), text)
+            p.drawText(QPointF(x - half, y), text)
         p.end()
 
     # ── 마우스 ──
@@ -396,13 +435,22 @@ class SettingsWindow(QWidget):
         reset = QPushButton("기본값")
         reset.clicked.connect(lambda: self.global_slider.setValue(100))
         size_row.addWidget(reset)
-        size_row.addSpacing(12)
         self.win_check = QCheckBox("열린 창 위에서 놀기")
         self.win_check.setToolTip("새 창이 열리면 펫이 뛰어올라가고, 창을 옮기면 같이 타고 다녀요")
         self.win_check.setChecked(app_ref.settings.data.get("window_play", True))
         self.win_check.toggled.connect(app_ref.set_window_play)
-        size_row.addWidget(self.win_check)
         root.addLayout(size_row)
+
+        opt_row = QHBoxLayout()
+        opt_row.addWidget(self.win_check)
+        opt_row.addSpacing(16)
+        self.fs_check = QCheckBox("전체화면일 때 숨기기")
+        self.fs_check.setToolTip("PPT 발표, 영상 전체화면, 게임 중에는 펫이 잠깐 사라졌다가 끝나면 다시 나와요")
+        self.fs_check.setChecked(app_ref.settings.data.get("hide_fullscreen", True))
+        self.fs_check.toggled.connect(app_ref.set_hide_fullscreen)
+        opt_row.addWidget(self.fs_check)
+        opt_row.addStretch()
+        root.addLayout(opt_row)
 
         bottom = QHBoxLayout()
         hint = QLabel("창을 닫아도 펫은 계속 놀아요. 작업표시줄 오른쪽 발바닥 아이콘이나 펫 우클릭으로 이 창을 다시 열 수 있어요.\n"
@@ -561,6 +609,7 @@ class PetApp:
         menu.addAction("사용법", self.show_help)
         menu.addAction("모두 켜기", lambda: self.set_all(True))
         menu.addAction("모두 끄기", lambda: self.set_all(False))
+        self.snooze_action = menu.addAction("30분 동안 숨기기", self.toggle_snooze)
         menu.addSeparator()
         menu.addAction("종료", self.quit)
         self.tray.setContextMenu(menu)
@@ -576,13 +625,23 @@ class PetApp:
         self.t0 = time.time()
         self.frame = 0
         self.plats = {}
+        self.win_rects = {}          # hwnd -> 마지막으로 본 창 위치 (물리 픽셀)
         self.seen_windows = None
         self.new_windows = {}
+        self.last_scan = -1.0
+        self.last_fs_check = -1.0
+        self.fullscreen = False
+        self.snooze_until = 0.0
+        self.paused = False
         self.timer = QTimer()
-        self.timer.setTimerType(Qt.PreciseTimer)
+        self.timer.setTimerType(Qt.CoarseTimer)    # 정밀 타이머보다 전력/CPU를 덜 씀
         self.timer.timeout.connect(self.tick)
         self.timer.start(TICK_MS)
 
+        if os.environ.get("DESKTOPPET_DEMO"):          # 시험 녹화용: 신호 파일이 생기면 연출 시작
+            self.demo_timer = QTimer()
+            self.demo_timer.timeout.connect(self.demo_poll)
+            self.demo_timer.start(200)
         if not self.pets or "--settings" in sys.argv:
             self.show_settings()
         if not self.settings.data.get("help_shown"):
@@ -613,7 +672,8 @@ class PetApp:
         if name not in self.pets:
             pet = PetWindow(name, self)
             self.pets[name] = pet
-            pet.show()
+            if not getattr(self, "paused", False):
+                pet.show()
 
     # ── 열린 창 = 발판 ──
     def to_logical(self, x, y):
@@ -634,7 +694,9 @@ class PetApp:
         except Exception:
             raw = {}
         plats = {}
+        self.win_rects = {}
         for hwnd, segs in raw.items():
+            self.win_rects[hwnd] = (segs[0][3], segs[0][2])      # (창 왼쪽, 창 위) 물리 픽셀
             for i, (x1, x2, y, wl) in enumerate(segs):
                 lx1, ly = self.to_logical(x1, y)
                 lx2, _ = self.to_logical(x2, y)
@@ -679,20 +741,87 @@ class PetApp:
                 del self.new_windows[h]
         self.plats = plats
 
+    def follow_windows(self):
+        """펫이 올라가 있는 창만 매 프레임 위치 확인 (전체 검색보다 훨씬 가벼움)"""
+        hwnds = {pet.brain.on[0] for pet in self.pets.values() if pet.brain.on is not None}
+        for h in hwnds:
+            old = self.win_rects.get(h)
+            r = winplat.window_rect(h)
+            if r is None:                                    # 닫힘/최소화 → 발판 없애기 (펫이 떨어짐)
+                self.plats = {k: v for k, v in self.plats.items() if k[0] != h}
+                self.win_rects.pop(h, None)
+                continue
+            if old is None or (r[0], r[1]) == old:
+                continue
+            ox, oy = self.to_logical(*old)
+            nx, ny = self.to_logical(r[0], r[1])
+            dx, dy = nx - ox, ny - oy
+            self.win_rects[h] = (r[0], r[1])
+            for k, (x1, x2, y, wl) in list(self.plats.items()):
+                if k[0] == h:
+                    self.plats[k] = (x1 + dx, x2 + dx, y + dy, wl + dx)
+
     def set_window_play(self, on):
         self.settings.data["window_play"] = on
         self.settings.save()
 
+    def set_hide_fullscreen(self, on):
+        self.settings.data["hide_fullscreen"] = on
+        self.settings.save()
+
+    def toggle_snooze(self):
+        now = time.time() - self.t0
+        if now < self.snooze_until:
+            self.snooze_until = 0.0
+        else:
+            self.snooze_until = now + 30 * 60
+        self.snooze_action.setText("다시 보이기" if self.snooze_until else "30분 동안 숨기기")
+        self.tick()
+
+    def set_paused(self, paused):
+        if paused == self.paused:
+            return
+        self.paused = paused
+        for pet in self.pets.values():
+            pet.setVisible(not paused)
+        self.snooze_action.setText("다시 보이기" if self.snooze_until else "30분 동안 숨기기")
+
     def tick(self):
         now = time.time() - self.t0
         self.frame += 1
-        if self.frame % 2 == 0:
-            self.scan_windows(now)
+
+        # 전체화면(발표·영상·게임) 중이거나 '30분 숨기기' 중이면 쉬기
+        if now - self.last_fs_check >= 1.0:
+            self.last_fs_check = now
+            self.fullscreen = self.settings.data.get("hide_fullscreen", True) and winplat.fullscreen_foreground()
+        if self.snooze_until and now >= self.snooze_until:
+            self.snooze_until = 0.0
+        self.set_paused(self.fullscreen or now < self.snooze_until)
+        if self.paused:
+            self.set_interval(PAUSE_TICK_MS)
+            return
+
+        if self.settings.data.get("window_play", True):
+            if now - self.last_scan >= SCAN_EVERY:
+                self.last_scan = now
+                self.scan_windows(now)
+            else:
+                self.follow_windows()
+        elif self.plats:
+            self.plats = {}
+
         c = QCursor.pos()
         mouse = (c.x(), c.y())
-        brains = [p.brain for p in self.pets.values()]
-        for pet in list(self.pets.values()):
-            pet.tick(now, mouse, brains, self.plats)
+        pets = list(self.pets.values())
+        brains = [p.brain for p in pets]
+        for pet in pets:
+            pet.think(now, mouse, brains, self.plats)
+        resolve_contacts(brains, now)
+        for pet in pets:
+            pet.render()
+
+        busy = any(b.state in FAST_STATES or b.emotes or b.hop_v or b.squash > 0.05 for b in brains)
+        self.set_interval(TICK_MS if busy or self.new_windows else IDLE_TICK_MS)
         if TRACE and self.frame % 15 == 0:
             try:
                 with open(DATA_DIR / "trace.txt", "a", encoding="utf-8") as f:
@@ -704,6 +833,42 @@ class PetApp:
                                 f"vx={b.vx:.1f} vy={b.vy:.1f} leap={b.leap} area={b.area}\n")
             except Exception:
                 pass
+
+    def demo_poll(self):
+        go = DATA_DIR / "demo_go"
+        if go.exists():
+            go.unlink(missing_ok=True)
+            self.demo_timer.stop()
+            self.demo_bump()
+
+    def demo_bump(self):
+        """시험 녹화용: 펫끼리 부딪히는 장면 연출"""
+        brains = [p.brain for p in self.pets.values()]
+        if len(brains) < 4:
+            return
+        area = screen_area(brains[0].cx, brains[0].cy)
+        mid = (area[0] + area[2]) / 2
+        a, b, c, d = brains[:4]
+        for br in brains:
+            br.meet_cool = 60                    # 인사 말고 부딪히기만
+            br.angle = br.flat = 0
+        for br, x, f in ((a, mid - 260, 1), (b, mid + 60, -1)):
+            br.cx, br.facing, br.speed = x, f, 2.6
+            br.set_state("walk", 6, 6)
+        d.cx = mid + 330
+        d.flat = 0.22
+        d.set_state("sleep", 30, 30)            # 자고 있는 친구
+        c.cx = mid - 80
+
+        def throw():
+            c.start_drag()
+            c.cx, c.cy = mid + 150, area[3] - c.h / 2 - 115
+            c.throw(10, -3)                      # 자는 친구 쪽으로 휙
+        QTimer.singleShot(4500, throw)
+
+    def set_interval(self, ms):
+        if self.timer.interval() != ms:
+            self.timer.setInterval(ms)
 
     def set_enabled(self, name, on):
         self.settings.pet(name)["enabled"] = on
@@ -754,6 +919,16 @@ class PetApp:
         QTimer.singleShot(3000, lambda: self.window.status.setText(""))
         if worker in self.workers:
             self.workers.remove(worker)
+        if not self.workers:
+            QTimer.singleShot(30_000, self.release_model)
+
+    def release_model(self):
+        """배경 제거가 끝나면 AI 모델(수백 MB)을 메모리에서 내림"""
+        if self.workers:
+            return
+        mod = sys.modules.get("bgremove")
+        if mod is not None:
+            mod.release()
 
     def on_added(self, name):
         self.settings.pet(name)
@@ -790,6 +965,8 @@ def main():
     qapp = QApplication(sys.argv)
     qapp.setApplicationName(APP_NAME)
     qapp.setFont(QFont("Malgun Gothic", 9))
+    init_emote_style()
+    winplat.lower_priority()
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     single = QLockFile(str(DATA_DIR / "running.lock"))
