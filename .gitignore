@@ -1,0 +1,6 @@
+__pycache__/
+.buildenv/
+build/
+dist/
+*.spec
+데스크탑펫.exe
