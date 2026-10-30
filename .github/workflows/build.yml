@@ -26,6 +26,9 @@ jobs:
       - name: 필요한 프로그램 설치
         run: python -m pip install PySide6-Essentials pillow pillow-heif numpy onnxruntime pyinstaller
 
+      - name: 버전 번호 넣기
+        run: python -c "open('build_info.py','w').write('BUILD = ${{ github.run_number }}\n')"
+
       - name: exe 만들기
         run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name DesktopPet --icon icon.ico --collect-binaries onnxruntime --collect-all pillow_heif --exclude-module tkinter --exclude-module matplotlib --exclude-module scipy --exclude-module pandas desktop_pet.py
 
@@ -131,15 +134,41 @@ jobs:
           if (Test-Path "$env:APPDATA\DesktopPet\error.log") { Copy-Item "$env:APPDATA\DesktopPet\error.log" shots\ }
           if (-not $p.HasExited) { Stop-Process -Id $p.Id }
 
+      - name: 자동 업데이트 시험 (한글 경로 exe 교체 후 다시 켜지는지)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force shots, C:\petapp, C:\upd | Out-Null
+          Get-Process DesktopPet -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep 2
+          Remove-Item "$env:APPDATA\DesktopPet\running.lock" -ErrorAction SilentlyContinue
+          Copy-Item dist\DesktopPet.exe "C:\petapp\데스크탑펫.exe"
+          Copy-Item dist\DesktopPet.exe C:\upd\new.exe
+          $before = (Get-Item "C:\petapp\데스크탑펫.exe").LastWriteTime
+          $env:DESKTOPPET_FAKE_UPDATE = "C:\upd\new.exe"
+          $env:DESKTOPPET_AUTO_APPLY = "1"
+          $null = Start-Process "C:\petapp\데스크탑펫.exe"
+          Start-Sleep 20
+          python ci/shot.py shots/18_업데이트_알림.png
+          Start-Sleep 40
+          $after = (Get-Item "C:\petapp\데스크탑펫.exe").LastWriteTime
+          "교체 전 파일 시각: $before / 교체 후: $after" | Tee-Object -FilePath shots/업데이트시험.txt -Append
+          Get-Process | Where-Object { $_.Path -like "C:\petapp\*" -or $_.Path -like "C:\upd\*" } | ForEach-Object { "실행 중: " + $_.Path } | Tee-Object -FilePath shots/업데이트시험.txt -Append
+          if (Test-Path "$env:APPDATA\DesktopPet\update.log") { Get-Content "$env:APPDATA\DesktopPet\update.log" | Tee-Object -FilePath shots/업데이트시험.txt -Append }
+          python ci/shot.py shots/19_업데이트후_다시켜짐.png
+          Get-Process | Where-Object { $_.Path -like "C:\petapp\*" } | Stop-Process -Force
+
       - name: 결과를 Release로 올리기
         if: always()
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ github.event.head_commit.message }}
         run: |
           New-Item -ItemType Directory -Force shots | Out-Null
+          (($env:NOTES -split "`n")[0]) | Set-Content notes.txt -Encoding utf8
           Compress-Archive -Path shots\* -DestinationPath shots.zip -Force
           $tag = "build-${{ github.run_number }}"
           $files = @("shots.zip")
           if (Test-Path dist\DesktopPet.exe) { $files += "dist\DesktopPet.exe" }
-          gh release create $tag @files --title "데스크탑펫 빌드 ${{ github.run_number }}" --notes "자동 빌드. DesktopPet.exe를 받아서 실행하세요."
+          gh release create $tag @files --title "데스크탑펫 빌드 ${{ github.run_number }}" --notes-file notes.txt

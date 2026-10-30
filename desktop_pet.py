@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 import random
 
 from help_text import HELP_HTML
+import updater
 import winplat
 from pet_brain import PetBrain, Snack, resolve_contacts, start_train
 
@@ -120,6 +121,30 @@ class BackgroundRemover(QThread):
                 if "urlopen" in msg or "Errno" in msg or "timed out" in msg:
                     msg = "배경 제거 모델을 내려받지 못했어요. 인터넷 연결을 확인해 주세요.\n\n" + msg
                 self.failed.emit(path.name, msg)
+
+
+class UpdateWorker(QThread):
+    """새 버전 확인 + 백그라운드 다운로드"""
+    ready = Signal(int, str, str)       # 빌드 번호, 받은 파일, 바뀐 점
+    latest = Signal(int)                # 이미 최신
+    failed = Signal(str)
+
+    def run(self):
+        try:
+            fake = os.environ.get("DESKTOPPET_FAKE_UPDATE")   # 시험용
+            if fake:
+                time.sleep(3)
+                self.ready.emit(updater.BUILD + 1, fake, "시험 업데이트")
+                return
+            info = updater.check_latest()
+            if not info or info[0] <= updater.BUILD:
+                self.latest.emit(updater.BUILD)
+                return
+            num, url, size, notes = info
+            path = updater.download(url, size, DATA_DIR / "update", num)
+            self.ready.emit(num, str(path), notes)
+        except Exception as e:
+            self.failed.emit(str(e))
 
 
 # ──────────────────────────── 펫 창 ────────────────────────────
@@ -562,6 +587,11 @@ class SettingsWindow(QWidget):
         self.status = QLabel("")
         self.status.setObjectName("status")
         top.addWidget(self.status, 1)
+        self.update_btn = QPushButton("✨ 새 버전으로 업데이트")
+        self.update_btn.setObjectName("add")
+        self.update_btn.clicked.connect(app_ref.apply_update)
+        self.update_btn.hide()
+        top.addWidget(self.update_btn)
         help_btn = QPushButton("? 사용법")
         help_btn.clicked.connect(app_ref.show_help)
         top.addWidget(help_btn)
@@ -649,6 +679,15 @@ class SettingsWindow(QWidget):
         self.boss_check.setChecked(app_ref.settings.data.get("boss_key", True))
         self.boss_check.toggled.connect(lambda on: app_ref.set_option("boss_key", on))
         work_row.addWidget(self.boss_check)
+        work_row.addSpacing(16)
+        self.auto_update_check = QCheckBox("자동 업데이트")
+        self.auto_update_check.setToolTip("새 버전이 나오면 알아서 받아 두고 알려 줘요. 누르면 바로 바뀌어요 (펫·설정은 그대로)")
+        self.auto_update_check.setChecked(app_ref.settings.data.get("auto_update", True))
+        self.auto_update_check.toggled.connect(lambda on: app_ref.set_option("auto_update", on))
+        work_row.addWidget(self.auto_update_check)
+        ver = QLabel(f"버전: 빌드 {updater.BUILD}" if updater.BUILD else "버전: 개발용")
+        ver.setObjectName("hint")
+        work_row.addWidget(ver)
         work_row.addStretch()
         root.addLayout(work_row)
 
@@ -814,10 +853,15 @@ class PetApp:
         self.snooze_action = menu.addAction("30분 동안 숨기기", self.toggle_snooze)
         self.boss_action = menu.addAction("지금 숨기기 (방향키 3번 연타)", self.toggle_boss)
         menu.addSeparator()
+        self.update_action = menu.addAction("✨ 지금 업데이트하기", self.apply_update)
+        self.update_action.setVisible(False)
+        menu.addAction("업데이트 확인", lambda: self.check_update(manual=True))
+        menu.addSeparator()
         menu.addAction("종료", self.quit)
         self.tray.setContextMenu(menu)
         self._menu = menu
         self.tray.activated.connect(self.on_tray)
+        self.tray.messageClicked.connect(self.on_tray_message)
         self.tray.show()
 
         for name in self.pet_names():
@@ -875,6 +919,104 @@ class PetApp:
             self.settings.data["help_shown"] = True
             self.settings.save()
             QTimer.singleShot(400, self.show_help)
+
+        # ── 자동 업데이트 ──
+        self.update_ready = None
+        self.update_worker = None
+        self.tray_msg_action = None
+        updater.cleanup(DATA_DIR / "update")
+        if self.settings.data.get("pending_build"):
+            done = self.settings.data.pop("pending_build")
+            notes = self.settings.data.pop("pending_notes", "")
+            self.settings.save()
+            if updater.BUILD >= done:
+                QTimer.singleShot(6000, lambda: self.announce_updated(notes))
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(lambda: self.check_update())
+        self.update_timer.start(3 * 60 * 60 * 1000)          # 3시간마다
+        QTimer.singleShot(40_000 if not os.environ.get("DESKTOPPET_FAKE_UPDATE") else 8000,
+                          lambda: self.check_update())
+
+    # ── 자동 업데이트 ──
+    def check_update(self, manual=False):
+        can = (updater.BUILD > 0 and updater.is_frozen()) or os.environ.get("DESKTOPPET_FAKE_UPDATE")
+        if not can:
+            if manual:
+                self.tray.showMessage(APP_NAME, "개발용 실행이라 업데이트 확인을 안 해요.")
+            return
+        if not manual and not self.settings.data.get("auto_update", True):
+            return
+        if self.update_ready:
+            if manual:
+                self.notify_update()
+            return
+        if self.update_worker is not None and self.update_worker.isRunning():
+            return
+        self.update_worker = UpdateWorker()
+        self.update_worker.ready.connect(self.on_update_ready)
+        if manual:
+            self.update_worker.latest.connect(
+                lambda n: self.tray.showMessage(APP_NAME, f"지금이 최신 버전이에요 (빌드 {n}) 👍"))
+            self.update_worker.failed.connect(
+                lambda e: self.tray.showMessage(APP_NAME, "업데이트를 확인하지 못했어요. 인터넷 연결을 확인해 주세요."))
+            self.tray.showMessage(APP_NAME, "새 버전이 있는지 확인하고 있어요…")
+        self.update_worker.start()
+
+    def on_update_ready(self, num, path, notes):
+        self.update_ready = (num, path, notes)
+        self.update_action.setText(f"✨ 지금 업데이트하기 (빌드 {num})")
+        self.update_action.setVisible(True)
+        self.window.update_btn.show()
+        self.notify_update()
+        if os.environ.get("DESKTOPPET_AUTO_APPLY"):          # 시험용
+            QTimer.singleShot(3000, self.apply_update)
+
+    def notify_update(self):
+        num, path, notes = self.update_ready
+        msg = "새 버전이 준비됐어요! 여기를 누르면 바로 업데이트돼요 (펫·설정은 그대로)"
+        if notes:
+            msg = f"바뀐 점: {notes}\n" + msg
+        self.tray.showMessage("데스크탑 펫 새 버전 ✨", msg, QSystemTrayIcon.Information, 15000)
+        free = [p.brain for p in self.pets.values() if p.brain.is_free()]
+        if free:
+            random.choice(free).say("새 버전이 왔어요! ✨", 4)
+
+    def on_tray_message(self):
+        if self.update_ready:
+            self.apply_update()
+
+    def apply_update(self):
+        if not self.update_ready:
+            return
+        num, path, notes = self.update_ready
+        target = updater.current_exe() if updater.is_frozen() else None
+        if os.environ.get("DESKTOPPET_FAKE_TARGET"):
+            target = Path(os.environ["DESKTOPPET_FAKE_TARGET"])
+        if target is None or not Path(path).exists():
+            QMessageBox.information(self.window, APP_NAME, "업데이트 파일을 찾지 못했어요. 잠시 뒤 다시 시도해 주세요.")
+            return
+        self.settings.data["pending_build"] = num
+        self.settings.data["pending_notes"] = notes
+        self.settings.save()
+        try:
+            updater.launch_installer(path, target)
+        except Exception as e:
+            QMessageBox.warning(self.window, APP_NAME, f"업데이트를 시작하지 못했어요.\n{e}")
+            return
+        self.quit()
+
+    def announce_updated(self, notes):
+        msg = f"빌드 {updater.BUILD}로 업데이트했어요 ✨"
+        if notes:
+            msg += f"\n바뀐 점: {notes}"
+        self.tray.showMessage("데스크탑 펫", msg, QSystemTrayIcon.Information, 10000)
+        brains = [p.brain for p in self.pets.values()]
+        for b in brains:
+            if b.is_free():
+                b.hops_left = 2
+                b.set_state("happy", 1.5, 2)
+        if brains:
+            random.choice(brains).say("업데이트 완료! ✨", 4)
 
     def on_tray(self, reason):
         if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
@@ -1466,6 +1608,11 @@ def install_error_log():
 
 
 def main():
+    if "--install-to" in sys.argv:                 # 새 버전이 자기 자신을 원래 자리에 덮어쓰는 모드
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        target = sys.argv[sys.argv.index("--install-to") + 1]
+        updater.run_install_mode(target, DATA_DIR / "update.log")
+        return
     install_error_log()
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     qapp = QApplication(sys.argv)

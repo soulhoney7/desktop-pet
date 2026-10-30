@@ -4,3 +4,4 @@ build/
 dist/
 *.spec
 데스크탑펫.exe
+build_info.py
