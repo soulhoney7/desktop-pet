@@ -4,6 +4,7 @@
 - 사진을 넣으면 배경을 자동으로 지우고 바탕화면을 돌아다니는 펫으로 만들어 줍니다.
 - 움직임/행동 로직은 pet_brain.py, 배경 제거는 bgremove.py
 """
+import datetime
 import json
 import math
 import os
@@ -16,14 +17,14 @@ from PySide6.QtGui import QColor, QCursor, QFont, QGuiApplication, QIcon, QKeySe
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, 
     QLabel, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider,
-    QSystemTrayIcon, QTextBrowser, QVBoxLayout, QWidget,
+    QComboBox, QSystemTrayIcon, QTextBrowser, QVBoxLayout, QWidget,
 )
 
 import random
 
 from help_text import HELP_HTML
 import winplat
-from pet_brain import PetBrain, resolve_contacts
+from pet_brain import PetBrain, Snack, resolve_contacts, start_train
 
 APP_NAME = "데스크탑 펫"
 DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "DesktopPet"
@@ -39,11 +40,15 @@ IDLE_TICK_MS = 90       # 다들 가만히 있을 때 (초당 11번) → CPU 절
 PAUSE_TICK_MS = 1000    # 전체화면/숨김 중
 SCAN_EVERY = 0.4        # 열린 창 목록 전체 검색 간격(초)
 FAST_STATES = ("air", "drag", "walk", "run", "chase", "hop", "dance", "to_wall", "climb", "hang",
-               "crouch", "meet", "happy", "dizzy")
+               "crouch", "meet", "happy", "dizzy", "go_snack", "eat", "train", "stretch")
+OFFWORK_LINES = ["퇴근까지 {m}분!", "조금만 더 힘내요!", "하암… 졸려", "오늘 저녁 뭐 먹지?",
+                 "칼퇴 가즈아!", "집에 가고 싶다…", "오늘도 고생 많았어요 ♥", "퇴근까지 {m}분 남았어요"]
 EMO_SPACE = 56         # 펫 머리 위 이모티콘 공간
 PINK = "#f06292"
 EMO_COLORS = {}
 EMO_FONTS = {}
+BUBBLE_FONT = None
+FOODS = ["🍪", "🍩", "🍙", "🍓", "🍰", "🍗", "🍦", "🥐"]
 
 
 def init_emote_style():
@@ -51,6 +56,9 @@ def init_emote_style():
                        "!": QColor(235, 70, 60), "?": QColor(80, 140, 230), "z": QColor(120, 120, 160),
                        "콩!": QColor(255, 105, 150), "뿅!": QColor(160, 110, 240)})
     EMO_FONTS["small"] = QFont("Segoe UI Symbol", 11, QFont.Bold)
+    global BUBBLE_FONT
+    BUBBLE_FONT = QFont("Malgun Gothic", 10, QFont.Bold)
+    EMO_COLORS.update({"냠": QColor(240, 130, 60), "하암": QColor(140, 130, 170)})
 
 
 # ──────────────────────────── 설정 저장 ────────────────────────────
@@ -77,9 +85,10 @@ class BackgroundRemover(QThread):
     finished_one = Signal(str)
     failed = Signal(str, str)
 
-    def __init__(self, paths):
+    def __init__(self, paths, split=True):
         super().__init__()
         self.paths = paths
+        self.split = split
 
     def run(self):
         import bgremove
@@ -87,14 +96,18 @@ class BackgroundRemover(QThread):
             path = Path(path)
             try:
                 self.progress.emit(f"{path.name} 배경 지우는 중… ({i}/{len(self.paths)})")
-                img = bgremove.make_pet_image(path, self.progress.emit)
+                imgs = bgremove.make_pet_images(path, self.progress.emit, split=self.split)
                 PET_DIR.mkdir(parents=True, exist_ok=True)
                 stem = "".join(c for c in path.stem if c not in '\\/:*?"<>|')[:30] or "pet"
-                name, n = stem, 2
-                while (PET_DIR / f"{name}.png").exists():
-                    name, n = f"{stem}_{n}", n + 1
-                img.save(PET_DIR / f"{name}.png")
-                self.finished_one.emit(name)
+                for k, img in enumerate(imgs, 1):
+                    base = stem if len(imgs) == 1 else f"{stem}_{k}"
+                    name, n = base, 2
+                    while (PET_DIR / f"{name}.png").exists():
+                        name, n = f"{base}_{n}", n + 1
+                    img.save(PET_DIR / f"{name}.png")
+                    self.finished_one.emit(name)
+                if len(imgs) > 1:
+                    self.progress.emit(f"{path.name}: {len(imgs)}마리로 나눴어요!")
             except Exception as e:
                 msg = str(e)
                 if "urlopen" in msg or "Errno" in msg or "timed out" in msg:
@@ -146,7 +159,7 @@ class PetWindow(QWidget):
                                 Qt.SmoothTransformation)
         pm.setDevicePixelRatio(dpr)
         self.pix, self.pw, self.ph = pm, w, h
-        side = int(math.hypot(w, h) * 1.25) + 16
+        side = max(int(math.hypot(w, h) * 1.25) + 16, 176)     # 말풍선 들어갈 너비
         self.setFixedSize(side, side + EMO_SPACE)
         if not first:
             self.brain.set_size(w, h)
@@ -172,7 +185,8 @@ class PetWindow(QWidget):
         b = self.brain
         self.place()
         em = tuple((e[0], int((b.now - e[1]) * 25)) for e in b.emotes)
-        key = (round(b.angle), round(b.squash * 30), round(b.flat_now * 40), b.facing, em, self.pw, self.ph)
+        key = (round(b.angle), round(b.squash * 30), round(b.flat_now * 40), b.facing, em, self.pw, self.ph,
+               b.bubble[0] if b.bubble else None)
         if key != self._key:
             self._key = key
             self.update()
@@ -234,7 +248,29 @@ class PetWindow(QWidget):
             color.setAlpha(alpha)
             p.setPen(color)
             p.drawText(QPointF(x - half, y), text)
+        if b.bubble:
+            self.draw_bubble(p, b.bubble[0], cx, head_y)
         p.end()
+
+    def draw_bubble(self, p, text, cx, head_y):
+        p.setFont(BUBBLE_FONT)
+        fm = p.fontMetrics()
+        tw = min(fm.horizontalAdvance(text), self.width() - 22)
+        text = fm.elidedText(text, Qt.ElideRight, tw + 1)
+        bw, bh = tw + 16, fm.height() + 8
+        x = max(2, min(self.width() - bw - 2, cx - bw / 2))
+        y = max(2, head_y - bh - 12)
+        p.setPen(QColor(240, 98, 146))
+        p.setBrush(QColor(255, 255, 255, 245))
+        p.drawRoundedRect(QRectF(x, y, bw, bh), 10, 10)
+        tail_x = max(x + 10, min(x + bw - 10, cx))
+        p.setPen(Qt.NoPen)
+        p.drawPolygon([QPointF(tail_x - 6, y + bh - 1), QPointF(tail_x + 6, y + bh - 1), QPointF(tail_x, y + bh + 7)])
+        p.setPen(QColor(240, 98, 146))
+        p.drawLine(QPointF(tail_x - 6, y + bh), QPointF(tail_x, y + bh + 7))
+        p.drawLine(QPointF(tail_x + 6, y + bh), QPointF(tail_x, y + bh + 7))
+        p.setPen(QColor(70, 60, 70))
+        p.drawText(QRectF(x, y, bw, bh), Qt.AlignCenter, text)
 
     # ── 마우스 ──
     def mousePressEvent(self, e):
@@ -305,10 +341,49 @@ class PetWindow(QWidget):
             a = menu.addAction(text, act(fn))
             a.setEnabled(free)
         menu.addSeparator()
+        menu.addAction("간식 주기 🍪", lambda: self.app_ref.drop_snack(b.cx + random.choice([-1, 1]) * random.uniform(120, 260)))
+        menu.addAction("기차놀이 🚂", self.app_ref.start_train)
+        menu.addSeparator()
         menu.addAction("이 펫 숨기기", lambda: self.app_ref.set_enabled(self.name, False))
         menu.addAction("설정 열기", self.app_ref.show_settings)
         menu.addAction("사용법", self.app_ref.show_help)
         menu.exec(e.globalPos())
+
+
+class SnackWindow(QWidget):
+    SIZE = 46
+
+    def __init__(self, snack):
+        super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+                         | Qt.NoDropShadowWindowHint | Qt.WindowTransparentForInput)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.snack = snack
+        self.scale = 1.0
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self._pos = None
+
+    def sync(self, now):
+        sn = self.snack
+        pos = (int(sn.x - self.SIZE / 2), int(sn.y - self.SIZE / 2 - 4))
+        if pos != self._pos:
+            self._pos = pos
+            self.move(*pos)
+        scale = 1.0 if sn.eat_t is None else max(0.0, 1 - (now - sn.eat_t) / 2.4)
+        scale = round(scale * 4) / 4                 # 한 입씩 줄어들기
+        if scale != self.scale:
+            self.scale = scale
+            self.update()
+
+    def paintEvent(self, _):
+        if self.scale <= 0:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        p.setFont(QFont("Segoe UI Emoji", max(6, int(22 * self.scale))))
+        p.drawText(self.rect(), Qt.AlignCenter, self.snack.food)
+        p.end()
 
 
 # ──────────────────────────── 설정창 ────────────────────────────
@@ -449,8 +524,37 @@ class SettingsWindow(QWidget):
         self.fs_check.setChecked(app_ref.settings.data.get("hide_fullscreen", True))
         self.fs_check.toggled.connect(app_ref.set_hide_fullscreen)
         opt_row.addWidget(self.fs_check)
+        opt_row.addSpacing(16)
+        self.split_check = QCheckBox("여러 마리 사진은 나누기")
+        self.split_check.setToolTip("한 사진에 캐릭터가 여러 마리면 한 마리씩 따로 펫으로 만들어요")
+        self.split_check.setChecked(app_ref.settings.data.get("split", True))
+        self.split_check.toggled.connect(lambda on: app_ref.set_option("split", on))
+        opt_row.addWidget(self.split_check)
         opt_row.addStretch()
         root.addLayout(opt_row)
+
+        work_row = QHBoxLayout()
+        self.off_check = QCheckBox("퇴근임박 모드")
+        self.off_check.setToolTip("퇴근 1시간 전부터 펫들이 졸고, 퇴근까지 남은 시간을 알려 주고, 퇴근하면 축하해요 (평일만)")
+        self.off_check.setChecked(app_ref.settings.data.get("offwork", True))
+        self.off_check.toggled.connect(lambda on: app_ref.set_option("offwork", on))
+        work_row.addWidget(self.off_check)
+        work_row.addWidget(QLabel("퇴근 시간"))
+        self.end_combo = QComboBox()
+        for hh in range(12, 24):
+            for mm in (0, 30):
+                self.end_combo.addItem(f"{hh:02d}:{mm:02d}")
+        self.end_combo.setCurrentText(app_ref.settings.data.get("work_end", "18:00"))
+        self.end_combo.currentTextChanged.connect(lambda t: app_ref.set_option("work_end", t))
+        work_row.addWidget(self.end_combo)
+        work_row.addSpacing(16)
+        self.rest_check = QCheckBox("50분마다 쉬는 시간 알림")
+        self.rest_check.setToolTip("50분마다 펫이 기지개를 켜며 잠깐 쉬자고 말해요")
+        self.rest_check.setChecked(app_ref.settings.data.get("rest_alert", True))
+        self.rest_check.toggled.connect(lambda on: app_ref.set_option("rest_alert", on))
+        work_row.addWidget(self.rest_check)
+        work_row.addStretch()
+        root.addLayout(work_row)
 
         bottom = QHBoxLayout()
         hint = QLabel("창을 닫아도 펫은 계속 놀아요. 작업표시줄 오른쪽 발바닥 아이콘이나 펫 우클릭으로 이 창을 다시 열 수 있어요.\n"
@@ -609,6 +713,8 @@ class PetApp:
         menu.addAction("사용법", self.show_help)
         menu.addAction("모두 켜기", lambda: self.set_all(True))
         menu.addAction("모두 끄기", lambda: self.set_all(False))
+        menu.addAction("간식 주기 🍪", lambda: self.drop_snack())
+        menu.addAction("기차놀이 🚂", self.start_train)
         self.snooze_action = menu.addAction("30분 동안 숨기기", self.toggle_snooze)
         menu.addSeparator()
         menu.addAction("종료", self.quit)
@@ -633,6 +739,13 @@ class PetApp:
         self.fullscreen = False
         self.snooze_until = 0.0
         self.paused = False
+        self.snacks = []                 # [(Snack, SnackWindow)]
+        self.next_train = random.uniform(90, 200)
+        self.next_rest = 50 * 60
+        self.next_chat = 0.0
+        self.last_clock_check = -1.0
+        self.done_events = {}            # 오늘 이미 한 퇴근 이벤트
+        self.clock_offset = datetime.timedelta(0)
         self.timer = QTimer()
         self.timer.setTimerType(Qt.CoarseTimer)    # 정밀 타이머보다 전력/CPU를 덜 씀
         self.timer.timeout.connect(self.tick)
@@ -784,6 +897,8 @@ class PetApp:
         self.paused = paused
         for pet in self.pets.values():
             pet.setVisible(not paused)
+        for _, win in self.snacks:
+            win.setVisible(not paused)
         self.snooze_action.setText("다시 보이기" if self.snooze_until else "30분 동안 숨기기")
 
     def tick(self):
@@ -819,9 +934,11 @@ class PetApp:
         resolve_contacts(brains, now)
         for pet in pets:
             pet.render()
+        self.update_snacks(now)
+        self.events(now, brains)
 
         busy = any(b.state in FAST_STATES or b.emotes or b.hop_v or b.squash > 0.05 for b in brains)
-        self.set_interval(TICK_MS if busy or self.new_windows else IDLE_TICK_MS)
+        self.set_interval(TICK_MS if busy or self.new_windows or self.snacks else IDLE_TICK_MS)
         if TRACE and self.frame % 15 == 0:
             try:
                 with open(DATA_DIR / "trace.txt", "a", encoding="utf-8") as f:
@@ -836,10 +953,29 @@ class PetApp:
 
     def demo_poll(self):
         go = DATA_DIR / "demo_go"
-        if go.exists():
-            go.unlink(missing_ok=True)
-            self.demo_timer.stop()
+        if not go.exists():
+            return
+        try:
+            what = go.read_text(encoding="utf-8").strip() or "bump"
+        except Exception:
+            what = "bump"
+        go.unlink(missing_ok=True)
+        if what == "bump":
             self.demo_bump()
+        elif what == "train":
+            for p in self.pets.values():
+                if p.brain.state not in ("air", "drag"):
+                    p.brain.on = None
+                    p.brain.set_state("idle", 9, 9)
+            self.start_train()
+        elif what == "snack":
+            self.drop_snack()
+        elif what.startswith("clock "):          # 예: clock 16:59:57 → 시계를 그 시각으로
+            hh, mm, ss = (int(v) for v in what.split()[1].split(":"))
+            real = datetime.datetime.now()
+            want = real.replace(hour=hh, minute=mm, second=ss, microsecond=0)
+            self.clock_offset = want - real
+            self.done_events = {}
 
     def demo_bump(self):
         """시험 녹화용: 펫끼리 부딪히는 장면 연출"""
@@ -865,6 +1001,159 @@ class PetApp:
             c.cx, c.cy = mid + 150, area[3] - c.h / 2 - 115
             c.throw(10, -3)                      # 자는 친구 쪽으로 휙
         QTimer.singleShot(4500, throw)
+
+    # ── 간식 ──
+    def now(self):
+        return time.time() - self.t0
+
+    def drop_snack(self, x=None, food=None):
+        if len(self.snacks) >= 3 or not self.pets:
+            return
+        now = self.now()
+        brains = [p.brain for p in self.pets.values()]
+        if x is None:
+            ref = random.choice(brains)
+            x = ref.cx + random.uniform(-300, 300)
+        area = screen_area(x, QGuiApplication.primaryScreen().availableGeometry().center().y())
+        x = min(max(x, area[0] + 40), area[2] - 40)
+        sn = Snack(x, area[1] + 20, food or random.choice(FOODS))
+        sn.born = now
+        win = SnackWindow(sn)
+        win.sync(now)
+        if not self.paused:
+            win.show()
+        self.snacks.append((sn, win))
+        for b in brains:
+            if b.is_free() and b.snack is None:
+                if b.state == "sleep":
+                    b.flat = 0.0
+                b.emote("ex", 0.9)
+                b.go_snack(sn)
+
+    def update_snacks(self, now):
+        if not self.snacks:
+            return
+        keep = []
+        for sn, win in self.snacks:
+            area = screen_area(sn.x, sn.y)
+            sn.update(now, area)
+            if sn.gone:
+                win.close()
+                continue
+            win.sync(now)
+            keep.append((sn, win))
+        self.snacks = keep
+
+    # ── 기차놀이 ──
+    def start_train(self):
+        start_train([p.brain for p in self.pets.values()], self.now())
+
+    # ── 시계 (퇴근임박 / 휴식 알림) ──
+    def clock(self):
+        return datetime.datetime.now() + self.clock_offset
+
+    def free_brains(self, brains):
+        return [b for b in brains if b.is_free()]
+
+    def events(self, now, brains):
+        if not brains:
+            return
+        # 가끔 저절로 기차놀이
+        if now >= self.next_train:
+            self.next_train = now + random.uniform(150, 360)
+            if len(brains) >= 2 and random.random() < 0.7:
+                start_train(brains, now)
+
+        # 50분마다 쉬는 시간
+        if now >= self.next_rest:
+            if not self.settings.data.get("rest_alert", True):
+                self.next_rest = now + 50 * 60
+            else:
+                free = self.free_brains(brains)
+                if free:
+                    self.next_rest = now + 50 * 60
+                    first = random.choice(free)
+                    first.stretch(random.choice(["50분 지났어요! 잠깐 쉬어요 ☕", "기지개 쭉~ 쉬었다 해요",
+                                                 "눈 좀 쉬어 줘요 👀", "물 한 잔 마셔요 💧"]))
+                    for b in free:
+                        if b is not first and random.random() < 0.6:
+                            b.stretch()
+                else:
+                    self.next_rest = now + 30
+
+        # 퇴근임박 모드 (1초에 한 번만 확인)
+        if now - self.last_clock_check < 1.0:
+            return
+        self.last_clock_check = now
+        on = self.settings.data.get("offwork", True)
+        dt = self.clock()
+        weekday_ok = dt.weekday() < 5 or self.clock_offset != datetime.timedelta(0)
+        hh, mm = (int(v) for v in self.settings.data.get("work_end", "18:00").split(":"))
+        end = dt.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        start = end - datetime.timedelta(hours=1)
+        day = dt.date().isoformat()
+        in_window = on and weekday_ok and start <= dt < end
+        for b in brains:
+            b.sleepy = in_window
+        if in_window:
+            mins = max(1, int((end - dt).total_seconds() // 60) + 1)
+            if self.done_events.get("hour") != day:
+                self.done_events["hour"] = day
+                self.offwork_start(brains, mins)
+                self.next_chat = now + random.uniform(240, 420)
+            elif mins <= 10 and self.done_events.get("ten") != day:
+                self.done_events["ten"] = day
+                free = self.free_brains(brains) or brains
+                random.choice(free).say("퇴근 10분 전! 슬슬 정리해요~", 4)
+                self.next_chat = now + 180
+            elif now >= self.next_chat:
+                self.next_chat = now + random.uniform(300, 540)
+                free = self.free_brains(brains)
+                if free:
+                    b = random.choice(free)
+                    b.say(random.choice(OFFWORK_LINES).format(m=mins), 3.5)
+                    if b.state == "sleep":
+                        b.flat = 0.0
+                        b.set_state("idle", 1, 2)
+        if on and weekday_ok and end <= dt < end + datetime.timedelta(minutes=20) \
+                and self.done_events.get("end") != day:
+            self.done_events["end"] = day
+            self.offwork_party(brains)
+
+    def offwork_start(self, brains, mins):
+        """퇴근 1시간 전: 다 같이 폴짝 + 간식 타임"""
+        free = self.free_brains(brains) or brains
+        lead = random.choice(free)
+        lead.say(f"퇴근 {mins}분 전!" if mins < 60 else "퇴근 1시간 전!", 4)
+        for b in free:
+            b.flat = 0.0
+            b.angle = 0.0
+            b.hops_left = 2
+            b.set_state("happy", 1.5, 2)
+            if b is not lead:
+                b.emote("ex", 1.0)
+        QTimer.singleShot(2200, lambda: self.drop_snack(lead.cx + 200))
+        others = [b for b in free if b is not lead]
+        if others:
+            QTimer.singleShot(2600, lambda: random.choice(others).say("당 충전 타임! 🍪", 3))
+
+    def offwork_party(self, brains):
+        """퇴근 시간: 다 같이 춤추며 축하"""
+        lead = random.choice(brains)
+        for b in brains:
+            if b.state in ("drag", "climb", "hang"):
+                continue
+            b.flat = 0.0
+            b.snack = None
+            b.set_state("dance", 6, 8)
+            b.emote("party", 2.0)
+            b.emote("✦", 0.8, dx=-20, style="burst")
+            b.emote("✦", 0.8, dx=20, style="burst")
+            b.say("퇴근이다!! 🎉" if b is lead else random.choice(["수고했어요 ♥", "오늘도 최고!", "집에 가자~"]), 4.5)
+
+    def set_option(self, key, value):
+        self.settings.data[key] = value
+        self.settings.save()
 
     def set_interval(self, ms):
         if self.timer.interval() != ms:
@@ -906,7 +1195,7 @@ class PetApp:
         self.window.rebuild()
 
     def add_images(self, paths):
-        worker = BackgroundRemover(paths)
+        worker = BackgroundRemover(paths, self.settings.data.get("split", True))
         worker.progress.connect(self.window.status.setText)
         worker.finished_one.connect(self.on_added)
         worker.failed.connect(lambda f, err: QMessageBox.warning(self.window, "추가 실패", f"{f}\n\n{err}"))

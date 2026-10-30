@@ -17,14 +17,16 @@ BEHAVIORS = {
 
 # 바닥(화면 아래나 창 위)에 서 있는 상태들
 GROUND_STATES = ("idle", "walk", "run", "sit", "sleep", "hop", "dance", "look", "chase",
-                 "to_wall", "meet", "happy", "dizzy", "crouch")
+                 "to_wall", "meet", "happy", "dizzy", "crouch", "go_snack", "eat", "train", "stretch")
 
 EMOTE = {"heart": "♥", "note": "♪", "z": "z", "q": "?", "ex": "!", "star": "★", "sweat": "💦",
-         "bonk": "콩!", "boing": "뿅!", "angry": "💢"}
+         "bonk": "콩!", "boing": "뿅!", "angry": "💢", "yum": "냠", "yawn": "하암", "party": "🎉"}
 
 # 서로 밀어낼 수 있는 상태 / 앞으로 걸어가는 상태
 CONTACT_SKIP = ("drag", "climb", "hang")
-MOVING = ("walk", "run", "chase", "to_wall", "hop")
+MOVING = ("walk", "run", "chase", "to_wall", "hop", "go_snack")
+# 펫이 바로 다른 일을 시작해도 되는 (한가한) 상태
+FREE_STATES = ("idle", "walk", "run", "sit", "look", "hop", "chase", "dance", "sleep")
 
 
 class PetBrain:
@@ -55,6 +57,10 @@ class PetBrain:
         self.emotes = []            # [글자, 시작시각, 지속, x흔들림]
         self.last_emote = 0.0
         self.bump_until = 0.0       # 부딪힘 쿨타임 (시각)
+        self.bubble = None          # 말풍선 [글, 시작, 지속]
+        self.snack = None           # 쫓아가는 간식
+        self.train = None           # 기차놀이 중이면 Train
+        self.sleepy = False         # 퇴근임박: 졸림
         self.strokes = 0
         self.meet_cool = 0.0
         self.partner = None
@@ -107,6 +113,12 @@ class PetBrain:
         if len(self.history) > 200:
             del self.history[:100]
 
+    def say(self, text, dur=3.0):
+        self.bubble = [text, self.now, dur]
+
+    def is_free(self):
+        return self.state in FREE_STATES
+
     def busy(self):
         return self.state in ("air", "drag", "climb", "hang", "dizzy", "meet", "happy")
 
@@ -127,6 +139,10 @@ class PetBrain:
                 if not (p[0] - self.w * 0.3 <= self.cx <= p[1] + self.w * 0.3):
                     self.fall_off()
         self.emotes = [e for e in self.emotes if now - e[1] < e[2]]
+        if self.bubble and now - self.bubble[1] > self.bubble[2]:
+            self.bubble = None
+        if self.state != "train":
+            self.train = None
         self.phase += 0.08
         self.squash *= 0.85
         self.flat_now += (self.flat - self.flat_now) * 0.1
@@ -168,6 +184,12 @@ class PetBrain:
         self.flat = 0.0
         weights = dict(BEHAVIORS)
         weights["sleep"] += self.idle_streak * 4
+        if self.sleepy:                           # 퇴근임박: 자꾸 졸고 하품
+            weights["sleep"] += 14
+            weights["sit"] += 8
+            weights["run"] = 2
+            if self.rng.random() < 0.25:
+                self.emote("yawn", 1.6)
         if mouse is None:
             weights["chase"] = 0
         targets = self.reachable_platforms()
@@ -289,6 +311,9 @@ class PetBrain:
         self.squash = 0.4
 
     def s_idle(self, area, ground, mouse, others):
+        if self.snack is not None and not self.snack.eaten:
+            self.go_snack(self.snack)
+            return
         self.bob = (math.sin(self.phase) + 1) * 1.0
         self.look_at_mouse(mouse)
         self.try_meet(others)
@@ -653,6 +678,8 @@ def resolve_contacts(brains, now):
                     continue
                 a_push = a.state in MOVING and a.facing == side
                 b_push = b.state in MOVING and b.facing == -side
+                if a.train is not None and a.train is b.train:
+                    a_push = b_push = False           # 기차 칸끼리는 밀기만
                 if (a_push or b_push) and now > a.bump_until and now > b.bump_until:
                     power = 1.4 if (a.state == "run" or b.state == "run") else 1.0
                     first = a if a_push else b
@@ -681,3 +708,190 @@ def resolve_contacts(brains, now):
                     else:
                         bump(p, away, now, 1.5, "ex")
                 burst(a, side, now)
+
+
+# ───────────────────── 간식 ─────────────────────
+class Snack:
+    """화면에 떨어지는 간식. 펫들이 달려가서 먼저 닿은 펫이 먹음"""
+    def __init__(self, x, y, food):
+        self.x, self.y, self.vy = x, y, 0.0
+        self.food = food
+        self.landed = False
+        self.eaten = False
+        self.eat_t = None
+        self.gone = False
+
+    def update(self, now, area):
+        if not self.landed:
+            self.vy += GRAVITY * 0.8
+            self.y += self.vy
+            ground = area[3] - 14
+            if self.y >= ground:
+                self.y = ground
+                if self.vy > 6:
+                    self.vy = -self.vy * 0.35   # 통 튕김
+                else:
+                    self.vy = 0.0
+                    self.landed = True
+        if self.eat_t is not None and now - self.eat_t > 2.4:
+            self.gone = True
+        if not self.eaten and self.landed and self.eat_t is None and getattr(self, "born", now) + 40 < now:
+            self.gone = True                   # 아무도 안 먹으면 40초 뒤 사라짐
+
+
+def _go_snack(self, snack):
+    self.snack = snack
+    self.flat = 0.0
+    self.angle = 0.0
+    self.set_state("go_snack", 20, 20)
+
+
+def _s_go_snack(self, area, ground, mouse, others):
+    sn = self.snack
+    if sn is None or sn.eaten or sn.gone:
+        self.snack = None
+        self.emote("q", 1.2)
+        if sn is not None and self.rng.random() < 0.4:
+            self.say("내 간식…", 2.2)
+        self.set_state("look", 1.2, 2)
+        return
+    dx = sn.x - self.cx
+    if abs(dx) < self.w * 0.3:
+        if self.on is not None:               # 창 위에 있으면 폴짝 내려감
+            self.fall_off(surprised=False)
+            self.vx, self.vy = self.facing * 1.5, -4.0
+            return
+        if sn.landed:
+            sn.eaten = True
+            sn.eat_t = self.now
+            self.set_state("eat", 2.4, 2.4)
+            self.emote("yum", 0.9)
+        return
+    self.facing = 1 if dx > 0 else -1
+    step = min(abs(dx), 4.2)
+    self.cx += self.facing * step
+    self.phase += 0.25
+    self.bob = abs(math.sin(self.phase * 1.6)) * 6
+    self.edge_decided = True                  # 간식 쫓을 땐 창 끝에서도 안 돌아섬
+    if self.now > self.until:
+        self.snack = None
+        self.set_state("idle", 1, 2)
+
+
+def _s_eat(self, area, ground, mouse, others):
+    self.phase += 0.3
+    self.flat = 0.07 * abs(math.sin(self.phase * 2.5))   # 오물오물
+    if self.now - self.last_emote > 0.7:
+        self.emote("yum", 0.8)
+    if self.now > self.until:
+        self.flat = 0.0
+        self.snack = None
+        self.emote("heart", 1.4)
+        if self.rng.random() < 0.5:
+            self.say(self.rng.choice(["맛있다!", "냠냠 최고", "배불러~"]), 2.2)
+        self.set_state("happy", 1.2, 1.8)
+        self.hops_left = 2
+
+
+# ───────────────────── 기지개 (50분 휴식 알림) ─────────────────────
+def _stretch(self, text=None):
+    self.angle = 0.0
+    self.flat = -0.2                          # 쭉 늘어나기
+    self.set_state("stretch", 2.2, 2.2)
+    if text:
+        self.say(text, 4.5)
+
+
+def _s_stretch(self, area, ground, mouse, others):
+    k = (self.until - self.now) / 2.2
+    self.flat = -0.2 * math.sin(max(0.0, min(1.0, k)) * math.pi)
+    if self.now > self.until:
+        self.flat = 0.0
+        self.set_state("idle", 1, 2)
+
+
+# ───────────────────── 기차놀이 ─────────────────────
+class Train:
+    def __init__(self, members, until, speed):
+        self.members = members
+        self.until = until
+        self.speed = speed
+
+    def end(self):
+        for m in self.members:
+            m.train = None
+            if m.state == "train":
+                m.emote("heart", 1.2)
+                m.set_state("idle", 1, 2)
+        self.members = []
+
+
+def start_train(brains, now, rng=random):
+    """바닥에 있는 한가한 펫들이 줄지어 칙칙폭폭"""
+    cands = [b for b in brains if b.on is None and b.state in FREE_STATES and b.state != "sleep"
+             and b.train is None and b.snack is None]
+    if len(cands) < 2:
+        return None
+    leader = rng.choice(cands)
+    others = sorted((b for b in cands if b is not leader and abs(b.cx - leader.cx) < 650),
+                    key=lambda b: abs(b.cx - leader.cx))[:4]
+    if not others:
+        return None
+    members = [leader] + others
+    l, t, r, _ = leader.area or (0, 0, 1920, 1080)
+    leader.facing = 1 if (r - leader.cx) > (leader.cx - l) else -1
+    tr = Train(members, now + rng.uniform(12, 17), rng.uniform(1.8, 2.4))
+    for m in members:
+        m.now = now
+        m.train = tr
+        m.flat = 0.0
+        m.angle = 0.0
+        m.set_state("train", 99, 99)
+        m.facing = leader.facing
+    leader.say("칙칙폭폭~ 🚂", 2.6)
+    for m in others:
+        m.emote("note", 1.4)
+    return tr
+
+
+def _s_train(self, area, ground, mouse, others):
+    tr = self.train
+    if tr is None or self not in tr.members:
+        self.train = None
+        self.set_state("idle", 1, 2)
+        return
+    tr.members = [m for m in tr.members if m.state == "train" and m.train is tr]
+    if len(tr.members) < 2 or self.now > tr.until:
+        tr.end()
+        return
+    l, t, r, b = area
+    i = tr.members.index(self)
+    self.phase += 0.2
+    self.bob = abs(math.sin(self.phase * 1.4)) * 4
+    if i == 0:
+        self.cx += self.facing * tr.speed
+        if (self.facing > 0 and self.cx >= r - self.w / 2 - 4) or (self.facing < 0 and self.cx <= l + self.w / 2 + 4):
+            # 벽에 닿으면 맨 뒤 칸이 새 기관차가 돼서 반대로 출발
+            new_dir = -self.facing
+            tr.members.reverse()
+            for m in tr.members:
+                m.facing = new_dir
+            tr.members[0].emote("note", 1.0)
+    else:
+        ah = tr.members[i - 1]
+        gap = (ah.w + self.w) / 2 * 0.9
+        tx = ah.cx - ah.facing * gap
+        d = tx - self.cx
+        lim = 5.0 if abs(d) > 40 else 3.6          # 멀면 뛰어서 따라붙기
+        self.cx += max(-lim, min(lim, d))
+        self.facing = ah.facing if abs(d) < 6 else (1 if d > 0 else -1)
+        if self.rng.random() < 0.004:
+            self.emote("note", 1.2)
+
+
+PetBrain.go_snack = _go_snack
+PetBrain.s_go_snack = _s_go_snack
+PetBrain.s_eat = _s_eat
+PetBrain.stretch = _stretch
+PetBrain.s_stretch = _s_stretch
+PetBrain.s_train = _s_train
