@@ -52,10 +52,13 @@ jobs:
           Start-Sleep 8
           python ci/shot.py shots/2_돌아다니는중.png
           Start-Process notepad
-          Start-Sleep 5
-          python ci/shot.py shots/3_메모장_열자마자.png
-          Start-Sleep 5
-          python ci/shot.py shots/4_메모장_위.png
+          Start-Sleep 1
+          pwsh -File ci/move_window.ps1 -x 330 -y 320
+          python ci/record.py shots/5_메모장_열고_20초.gif 20
+          python ci/shot.py shots/3_메모장_20초뒤.png
+          pwsh -File ci/move_window.ps1 -x 120 -y 260
+          python ci/record.py shots/6_메모장_옮기기.gif 8
+          python ci/shot.py shots/4_메모장_옮긴뒤.png
           "exe 살아있음: $(-not $p.HasExited)" | Tee-Object shots/log_실행.txt
           if (Test-Path "$env:APPDATA\DesktopPet\error.log") { Copy-Item "$env:APPDATA\DesktopPet\error.log" shots\ }
           if (-not $p.HasExited) { Stop-Process -Id $p.Id }
