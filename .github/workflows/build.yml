@@ -50,7 +50,7 @@ jobs:
           Remove-Item "$d\*" -ErrorAction SilentlyContinue
           Copy-Item ci\pets\*.png $d
           '{"global_scale": 120, "pets": {}, "help_shown": true}' | Set-Content "$env:APPDATA\DesktopPet\settings.json" -Encoding utf8
-          gh release download build-6 -p DesktopPet.exe -D old -R ${{ github.repository }}
+          gh release download build-9 -p DesktopPet.exe -D old -R ${{ github.repository }}
           if (Test-Path old\DesktopPet.exe) { pwsh -File ci/measure.ps1 -exe old\DesktopPet.exe -label "이전 버전" -out shots/측정.txt }
           pwsh -File ci/measure.ps1 -exe dist\DesktopPet.exe -label "새 버전" -out shots/측정.txt
 
@@ -64,20 +64,29 @@ jobs:
           python ci/make_group_pet.py shots/0_여러마리_한펫.png
           $env:DESKTOPPET_DEMO = "1"
           $go = "$env:APPDATA\DesktopPet\demo_go"
+          # 예전 버전이 켜져 있는 상태에서 새 버전 켜기 (자동으로 예전 것 끄고 교체되는지)
+          if (Test-Path old\DesktopPet.exe) {
+            $null = Start-Process old\DesktopPet.exe -PassThru
+            Start-Sleep 20
+            "예전 버전 켠 뒤 프로세스 수: $((Get-Process DesktopPet).Count)" | Tee-Object -FilePath shots/교체시험.txt -Append
+          }
+          $env:DESKTOPPET_TAKEOVER = "1"
           $p = Start-Process dist\DesktopPet.exe -PassThru
           Start-Sleep 22
+          "새 버전 켠 뒤 프로세스 수: $((Get-Process DesktopPet).Count)  (onefile은 1개당 2개)" | Tee-Object -FilePath shots/교체시험.txt -Append
+          Get-Process DesktopPet | ForEach-Object { "  " + $_.Path } | Tee-Object -FilePath shots/교체시험.txt -Append
           python ci/record.py shots/13_여러마리_통통.gif 10
           python ci/record.py shots/7_부딪힘.gif 12 $go bump
-          python ci/record.py shots/8_기차놀이.gif 14 $go train
+          python ci/record.py shots/8_기차놀이.gif 34 $go train
           python ci/record.py shots/9_간식.gif 12 $go snack
           python ci/record.py shots/10_퇴근1시간전.gif 14 $go "clock 16:59:57"
           python ci/record.py shots/11_퇴근축하.gif 12 $go "clock 17:59:57"
           python ci/shot.py shots/12_퇴근축하_사진.png
           Start-Sleep 8
           python ci/shot.py shots/14_숨기기전.png
-          python ci/keys.py right right right
+          python ci/keys.py 0.012 right right right
           Start-Sleep 2
-          python ci/shot.py shots/15_방향키3번_숨김.png
+          python ci/shot.py shots/15_아주짧은연타3번_숨김.png
           python ci/keys.py left up left
           Start-Sleep 2
           python ci/shot.py shots/16_다시3번_보임.png
@@ -89,6 +98,7 @@ jobs:
           Start-Sleep 2
           python ci/shot.py shots/17_천천히3번_그대로.png
           if (Test-Path "$env:APPDATA\DesktopPet\error.log") { Copy-Item "$env:APPDATA\DesktopPet\error.log" shots\error_demo.log }
+          if (Test-Path "$env:APPDATA\DesktopPet\keys_debug.txt") { Copy-Item "$env:APPDATA\DesktopPet\keys_debug.txt" shots\ }
           Get-Process DesktopPet -ErrorAction SilentlyContinue | Stop-Process -Force
           Start-Sleep 3
           Remove-Item "$env:APPDATA\DesktopPet\running.lock" -ErrorAction SilentlyContinue

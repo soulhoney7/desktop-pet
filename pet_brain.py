@@ -673,12 +673,23 @@ def resolve_contacts(brains, now):
                 # 같은 바닥(화면 바닥 또는 같은 창) 위에 서 있을 때만
                 if a.on != b.on or abs((a.cy + a.h / 2) - (b.cy + b.h / 2)) > 4:
                     continue
+                same_train = a.train is not None and a.train is b.train
+                # 기차랑 마주친 한가한 펫 → 꼬리 칸에 탑승
+                if not same_train and (a.train is None) != (b.train is None):
+                    tr, other = (a.train, b) if a.train is not None else (b.train, a)
+                    near = (a.w + b.w) / 2 + 12 - abs(dx)
+                    if near > 0 and other.state in FREE_STATES and other.state != "sleep" \
+                            and other.snack is None and other.on is None and tr.leader is not None:
+                        if tr.join(other, now):
+                            continue
                 overlap = (a.w + b.w) / 2 * 0.8 - abs(dx)
                 if overlap <= 0:
                     continue
+                if same_train and a.train.turning:
+                    continue                          # 대장이 머리 위로 넘어가는 중
                 a_push = a.state in MOVING and a.facing == side
                 b_push = b.state in MOVING and b.facing == -side
-                if a.train is not None and a.train is b.train:
+                if same_train:
                     a_push = b_push = False           # 기차 칸끼리는 밀기만
                 if (a_push or b_push) and now > a.bump_until and now > b.bump_until:
                     power = 1.4 if (a.state == "run" or b.state == "run") else 1.0
@@ -811,11 +822,19 @@ def _s_stretch(self, area, ground, mouse, others):
 
 
 # ───────────────────── 기차놀이 ─────────────────────
+TRAIN_MAX = 8
+
+
 class Train:
     def __init__(self, members, until, speed):
         self.members = members
         self.until = until
         self.speed = speed
+        self.turning = False         # 대장이 친구들 머리 위로 넘어가서 방향 바꾸는 중
+
+    @property
+    def leader(self):
+        return self.members[0] if self.members else None
 
     def end(self):
         for m in self.members:
@@ -825,27 +844,55 @@ class Train:
                 m.set_state("idle", 1, 2)
         self.members = []
 
+    def join(self, b, now):
+        """기차랑 마주친 펫이 꼬리 칸에 탑승"""
+        if len(self.members) >= TRAIN_MAX or b in self.members:
+            return False
+        b.now = now
+        b.train = self
+        b.snack = None
+        b.flat = 0.0
+        b.angle = 0.0
+        b.set_state("train", 99, 99)
+        b.facing = self.leader.facing
+        self.members.append(b)
+        b.emote("ex", 0.9)
+        b.say(b.rng.choice(["나도 탈래!", "같이 가~", "탑승!"]), 2.2)
+        self.until = max(self.until, now + 12)      # 손님이 타면 조금 더 달림
+        return True
 
-def start_train(brains, now, rng=random):
-    """바닥에 있는 한가한 펫들이 줄지어 칙칙폭폭"""
+
+def start_train(brains, now, rng=random, leader=None):
+    """바닥에 있는 한가한 펫들이 줄지어 칙칙폭폭. leader를 주면 그 펫이 대장"""
+    for b in brains:                                 # 이미 달리는 기차는 끝내고 새로
+        if b.train is not None:
+            b.train.end()
     cands = [b for b in brains if b.on is None and b.state in FREE_STATES and b.state != "sleep"
-             and b.train is None and b.snack is None]
-    if len(cands) < 2:
+             and b.snack is None]
+    if leader is None:
+        if len(cands) < 2:
+            return None
+        leader = rng.choice(cands)
+    elif leader.state in ("air", "drag", "climb", "hang"):
         return None
-    leader = rng.choice(cands)
-    others = sorted((b for b in cands if b is not leader and abs(b.cx - leader.cx) < 650),
-                    key=lambda b: abs(b.cx - leader.cx))[:4]
+    if leader.on is not None:                        # 창 위에 있던 대장은 바닥으로
+        leader.on = None
+    others = sorted((b for b in cands if b is not leader and abs(b.cx - leader.cx) < 900),
+                    key=lambda b: abs(b.cx - leader.cx))[:TRAIN_MAX - 1]
     if not others:
+        leader.now = now
+        leader.say("같이 놀 친구가 없어…", 2.5)
         return None
     members = [leader] + others
     l, t, r, _ = leader.area or (0, 0, 1920, 1080)
     leader.facing = 1 if (r - leader.cx) > (leader.cx - l) else -1
-    tr = Train(members, now + rng.uniform(12, 17), rng.uniform(1.8, 2.4))
+    tr = Train(members, now + rng.uniform(30, 45), rng.uniform(1.9, 2.4))
     for m in members:
         m.now = now
         m.train = tr
         m.flat = 0.0
         m.angle = 0.0
+        m.snack = None
         m.set_state("train", 99, 99)
         m.facing = leader.facing
     leader.say("칙칙폭폭~ 🚂", 2.6)
@@ -867,17 +914,36 @@ def _s_train(self, area, ground, mouse, others):
     l, t, r, b = area
     i = tr.members.index(self)
     self.phase += 0.2
-    self.bob = abs(math.sin(self.phase * 1.4)) * 4
+    lead = tr.members[0]
     if i == 0:
+        if tr.turning:
+            # 친구들 머리 위로 폴짝폴짝 넘어가기
+            self.cx += self.facing * 5.0
+            if self.hop_y == 0 and self.hop_v == 0:
+                self.hop_v = -8.5
+            last = tr.members[1]
+            ahead_done = (self.cx < last.cx - (self.w + last.w) / 2 * 0.9) if self.facing < 0 \
+                else (self.cx > last.cx + (self.w + last.w) / 2 * 0.9)
+            if ahead_done or self.cx <= l + self.w / 2 or self.cx >= r - self.w / 2:
+                tr.turning = False
+                self.emote("note", 1.0)
+            return
+        self.bob = abs(math.sin(self.phase * 1.4)) * 4
         self.cx += self.facing * tr.speed
         if (self.facing > 0 and self.cx >= r - self.w / 2 - 4) or (self.facing < 0 and self.cx <= l + self.w / 2 + 4):
-            # 벽에 닿으면 맨 뒤 칸이 새 기관차가 돼서 반대로 출발
-            new_dir = -self.facing
-            tr.members.reverse()
-            for m in tr.members:
-                m.facing = new_dir
-            tr.members[0].emote("note", 1.0)
+            # 벽에 닿으면 대장이 뒤로 돌아 친구들을 넘어가고, 줄 순서도 뒤집힘 (대장은 그대로!)
+            self.facing = -self.facing
+            tr.members[1:] = tr.members[:0:-1]
+            for m in tr.members[1:]:
+                m.facing = self.facing
+            tr.turning = True
+            self.say("반대로~!", 1.8)
     else:
+        if tr.turning:                               # 대장이 넘어가는 동안 제자리에서 기다림
+            self.facing = lead.facing
+            self.bob = abs(math.sin(self.phase * 1.4)) * 2
+            return
+        self.bob = abs(math.sin(self.phase * 1.4)) * 4
         ah = tr.members[i - 1]
         gap = (ah.w + self.w) / 2 * 0.9
         tx = ah.cx - ah.facing * gap

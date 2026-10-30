@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile, QPoint, QPointF, QRectF, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QAbstractNativeEventFilter, QLockFile, QPoint, QPointF, QRectF, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QFont, QGuiApplication, QIcon, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, 
@@ -123,6 +123,27 @@ class BackgroundRemover(QThread):
 
 
 # ──────────────────────────── 펫 창 ────────────────────────────
+class RawKeyFilter(QAbstractNativeEventFilter):
+    """윈도우 키보드 Raw Input(WM_INPUT)에서 방향키만 골라 알려 줌"""
+    def __init__(self, callback):
+        super().__init__()
+        self.callback = callback
+
+    def nativeEventFilter(self, event_type, message):
+        try:
+            if bytes(event_type) == b"windows_generic_MSG":
+                import ctypes
+                from ctypes import wintypes
+                msg = wintypes.MSG.from_address(int(message))
+                if msg.message == winplat.WM_INPUT:
+                    key = winplat.read_raw_key(msg.lParam)
+                    if key:
+                        self.callback(*key)
+        except Exception:
+            pass
+        return False, 0
+
+
 def load_parts(name):
     d = PARTS_DIR / name
     try:
@@ -406,7 +427,10 @@ class PetWindow(QWidget):
             a.setEnabled(free)
         menu.addSeparator()
         menu.addAction("간식 주기 🍪", lambda: self.app_ref.drop_snack(b.cx + random.choice([-1, 1]) * random.uniform(120, 260)))
-        menu.addAction("기차놀이 🚂", self.app_ref.start_train)
+        menu.addAction("기차놀이 🚂 (얘가 대장)", lambda: self.app_ref.start_train(self.name))
+        lead = menu.addAction("평소 기차 대장으로 정하기 👑", lambda: self.app_ref.set_train_leader(self.name))
+        lead.setCheckable(True)
+        lead.setChecked(self.app_ref.settings.data.get("train_leader") == self.name)
         menu.addSeparator()
         menu.addAction("이 펫 숨기기", lambda: self.app_ref.set_enabled(self.name, False))
         menu.addAction("설정 열기", self.app_ref.show_settings)
@@ -825,7 +849,15 @@ class PetApp:
         self.key_taps = []
         self.key_timer = QTimer()
         self.key_timer.timeout.connect(self.poll_keys)
-        self.key_timer.start(30)
+        self.key_timer.start(30)                   # 예비용 (Raw Input이 되면 멈춤)
+        self.raw_seen = False
+        self.raw_down = set()
+        self.key_win = QWidget()                   # 화면에 안 보이는 키 수신용 창
+        self.key_win.setAttribute(Qt.WA_DontShowOnScreen)
+        self.raw_ok = winplat.register_raw_keyboard(int(self.key_win.winId()))
+        self.key_filter = RawKeyFilter(self.on_raw_key)
+        qapp.installNativeEventFilter(self.key_filter)
+        self.key_log("raw_input_registered=%s" % self.raw_ok)
         self.timer = QTimer()
         self.timer.setTimerType(Qt.CoarseTimer)    # 정밀 타이머보다 전력/CPU를 덜 씀
         self.timer.timeout.connect(self.tick)
@@ -971,19 +1003,43 @@ class PetApp:
         self.snooze_action.setText("다시 보이기" if self.snooze_until else "30분 동안 숨기기")
         self.tick()
 
-    def poll_keys(self):
+    def key_log(self, text):
+        if os.environ.get("DESKTOPPET_DEMO"):        # 시험할 때만 기록
+            try:
+                with open(DATA_DIR / "keys_debug.txt", "a", encoding="utf-8") as f:
+                    f.write(f"{time.time():.3f} {text}\n")
+            except Exception:
+                pass
+
+    def arrow_tap(self, source):
         if not self.settings.data.get("boss_key", True):
             return
-        down = winplat.arrows_down()
-        pressed = down - self.key_prev                # 새로 누른 키 (꾹 누르고 있는 건 한 번)
-        self.key_prev = down
-        if not pressed:
-            return
         t = time.time()
-        self.key_taps = [x for x in self.key_taps if t - x < 0.7] + [t]
+        self.key_taps = [x for x in self.key_taps if t - x < 0.9] + [t]   # 0.9초 안에 3번
+        self.key_log(f"tap {source} n={len(self.key_taps)}")
         if len(self.key_taps) >= 3:
             self.key_taps = []
             self.toggle_boss()
+
+    def on_raw_key(self, vk, up):
+        if not self.raw_seen:
+            self.raw_seen = True
+            self.key_timer.stop()                     # 정확한 방식이 되니 예비 감시는 끔
+            self.key_log("raw_input_working")
+        if vk not in winplat.ARROW_KEYS:
+            return
+        if up:
+            self.raw_down.discard(vk)
+        elif vk not in self.raw_down:                 # 꾹 누르고 있는 자동 반복은 한 번으로
+            self.raw_down.add(vk)
+            self.arrow_tap("raw")
+
+    def poll_keys(self):
+        down = winplat.arrows_down()
+        pressed = down - self.key_prev                # 새로 누른 키 (꾹 누르고 있는 건 한 번)
+        self.key_prev = down
+        if pressed:
+            self.arrow_tap("poll")
 
     def toggle_boss(self):
         self.boss = not self.boss
@@ -1067,11 +1123,27 @@ class PetApp:
         if what == "bump":
             self.demo_bump()
         elif what == "train":
-            for p in self.pets.values():
-                if p.brain.state not in ("air", "drag"):
-                    p.brain.on = None
-                    p.brain.set_state("idle", 9, 9)
-            self.start_train()
+            # 대장 + 친구 둘이 출발, 나머지는 자다가 깨서 기차랑 마주치면 탑승
+            names = sorted(self.pets)
+            brains = [self.pets[n].brain for n in names]
+            area = screen_area(brains[0].cx, brains[0].cy)
+            for k, b in enumerate(brains):
+                b.on = None
+                b.angle = b.flat = 0
+                b.snack = None
+                b.cx = area[0] + 120 + k * 150
+                b.set_state("idle", 99, 99)
+            far = brains[3:]
+            for b in far:
+                b.cx = area[2] - 140 - (len(far) - 1 - far.index(b)) * 170
+                b.set_state("sleep", 99, 99)
+            self.start_train(names[0])
+
+            def wake():
+                for b in far:
+                    if b.state == "sleep":
+                        b.set_state("idle", 99, 99)
+            QTimer.singleShot(1500, wake)
         elif what == "snack":
             self.drop_snack()
         elif what.startswith("clock "):          # 예: clock 16:59:57 → 시계를 그 시각으로
@@ -1149,8 +1221,22 @@ class PetApp:
         self.snacks = keep
 
     # ── 기차놀이 ──
-    def start_train(self):
-        start_train([p.brain for p in self.pets.values()], self.now())
+    def start_train(self, leader_name=None):
+        """leader_name을 주면 그 펫이 대장. 없으면 정해 둔 대장(있으면) 또는 아무나"""
+        name = leader_name or self.settings.data.get("train_leader")
+        leader = self.pets[name].brain if name in self.pets else None
+        if leader is not None and leader_name is None and not leader.is_free():
+            leader = None
+        start_train([p.brain for p in self.pets.values()], self.now(), leader=leader)
+
+    def set_train_leader(self, name):
+        cur = self.settings.data.get("train_leader")
+        self.settings.data["train_leader"] = None if cur == name else name
+        self.settings.save()
+        if self.settings.data["train_leader"] and name in self.pets:
+            b = self.pets[name].brain
+            b.emote("ex", 0.9)
+            b.say("내가 기차 대장! 👑", 2.5)
 
     # ── 시계 (퇴근임박 / 휴식 알림) ──
     def clock(self):
@@ -1166,7 +1252,7 @@ class PetApp:
         if now >= self.next_train:
             self.next_train = now + random.uniform(150, 360)
             if len(brains) >= 2 and random.random() < 0.7:
-                start_train(brains, now)
+                self.start_train()
 
         # 50분마다 쉬는 시간
         if now >= self.next_rest:
@@ -1339,6 +1425,27 @@ class PetApp:
         self.qapp.quit()
 
 
+def take_over(lock):
+    """이미 켜져 있는(예전 버전일 수도 있는) 데스크탑 펫을 끄고 잠금을 가져옴"""
+    try:
+        info = lock.getLockInfo()
+        pid = int(info[1]) if isinstance(info, (tuple, list)) and info[0] else 0
+    except Exception:
+        pid = 0
+    if pid and pid != os.getpid():
+        try:
+            import signal
+            os.kill(pid, signal.SIGTERM)          # 윈도우에선 그 프로그램을 바로 끔
+        except Exception:
+            pass
+    for _ in range(30):
+        time.sleep(0.2)
+        lock.removeStaleLockFile()
+        if lock.tryLock(100):
+            return True
+    return False
+
+
 def install_error_log():
     """오류가 나면 %APPDATA%\\DesktopPet\\error.log에 기록 (창 없는 exe라 오류가 안 보이므로)"""
     import traceback
@@ -1366,8 +1473,18 @@ def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     single = QLockFile(str(DATA_DIR / "running.lock"))
     if not single.tryLock(100):
-        QMessageBox.information(None, APP_NAME, "이미 실행 중이에요.\n작업표시줄 오른쪽 발바닥 아이콘을 눌러 보세요.")
-        return
+        auto = bool(os.environ.get("DESKTOPPET_TAKEOVER"))
+        if not auto:
+            ans = QMessageBox.question(
+                None, APP_NAME,
+                "데스크탑 펫이 이미 켜져 있어요.\n\n켜져 있는 걸 끄고 지금 이걸로 새로 켤까요?\n"
+                "(새 버전 exe를 받았다면 '예'를 누르세요)")
+            if ans != QMessageBox.Yes:
+                return
+        if not take_over(single):
+            QMessageBox.information(None, APP_NAME, "켜져 있는 걸 끄지 못했어요.\n"
+                                    "작업표시줄 오른쪽 발바닥 아이콘 우클릭 → 종료 후 다시 켜 주세요.")
+            return
 
     app = PetApp(qapp)
     qapp.exec()

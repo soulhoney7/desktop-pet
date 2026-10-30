@@ -198,3 +198,52 @@ def arrows_down():
         return frozenset(vk for vk in ARROW_KEYS if user32.GetAsyncKeyState(vk) & 0x8000)
     except Exception:
         return frozenset()
+
+
+# ───── Raw Input: 다른 창을 보고 있어도 방향키 누름을 정확히 받기 (아주 짧은 연타도) ─────
+WM_INPUT = 0x00FF
+if IS_WIN:
+    class RAWINPUTDEVICE(ctypes.Structure):
+        _fields_ = [("usUsagePage", wintypes.USHORT), ("usUsage", wintypes.USHORT),
+                    ("dwFlags", wintypes.DWORD), ("hwndTarget", wintypes.HWND)]
+
+    class RAWINPUTHEADER(ctypes.Structure):
+        _fields_ = [("dwType", wintypes.DWORD), ("dwSize", wintypes.DWORD),
+                    ("hDevice", wintypes.HANDLE), ("wParam", wintypes.WPARAM)]
+
+    class RAWKEYBOARD(ctypes.Structure):
+        _fields_ = [("MakeCode", wintypes.USHORT), ("Flags", wintypes.USHORT), ("Reserved", wintypes.USHORT),
+                    ("VKey", wintypes.USHORT), ("Message", wintypes.UINT), ("ExtraInformation", wintypes.ULONG)]
+
+    class RAWINPUT(ctypes.Structure):
+        _fields_ = [("header", RAWINPUTHEADER), ("keyboard", RAWKEYBOARD)]
+
+    user32.RegisterRawInputDevices.argtypes = [ctypes.POINTER(RAWINPUTDEVICE), wintypes.UINT, wintypes.UINT]
+    user32.GetRawInputData.argtypes = [wintypes.HANDLE, wintypes.UINT, ctypes.c_void_p,
+                                       ctypes.POINTER(wintypes.UINT), wintypes.UINT]
+    user32.GetRawInputData.restype = wintypes.UINT
+    _raw_buf = RAWINPUT()
+
+
+def register_raw_keyboard(hwnd):
+    """키보드 입력을 (창이 뒤에 있어도) 이 창으로도 알려 달라고 등록. 키 입력을 막거나 바꾸지 않음"""
+    if not IS_WIN:
+        return False
+    try:
+        dev = RAWINPUTDEVICE(0x01, 0x06, 0x00000100, hwnd)    # 키보드, RIDEV_INPUTSINK
+        return bool(user32.RegisterRawInputDevices(ctypes.byref(dev), 1, ctypes.sizeof(dev)))
+    except Exception:
+        return False
+
+
+def read_raw_key(lparam):
+    """WM_INPUT 메시지 → (가상키, 뗐는지) / 키보드가 아니면 None"""
+    try:
+        size = wintypes.UINT(ctypes.sizeof(_raw_buf))
+        got = user32.GetRawInputData(lparam, 0x10000003, ctypes.byref(_raw_buf), ctypes.byref(size),
+                                     ctypes.sizeof(RAWINPUTHEADER))
+        if got == 0xFFFFFFFF or _raw_buf.header.dwType != 1:
+            return None
+        return int(_raw_buf.keyboard.VKey), bool(_raw_buf.keyboard.Flags & 1)
+    except Exception:
+        return None
