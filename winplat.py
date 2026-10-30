@@ -181,3 +181,20 @@ def lower_priority():
             k.SetPriorityClass(k.GetCurrentProcess(), 0x00004000)   # BELOW_NORMAL_PRIORITY_CLASS
         except Exception:
             pass
+
+
+ARROW_KEYS = (0x25, 0x26, 0x27, 0x28)      # ← ↑ → ↓
+
+if IS_WIN:
+    user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+    user32.GetAsyncKeyState.restype = ctypes.c_short
+
+
+def arrows_down():
+    """지금 눌려 있는 방향키 (어떤 창을 보고 있어도 확인 가능, 키 입력은 가로채지 않음)"""
+    if not IS_WIN:
+        return frozenset()
+    try:
+        return frozenset(vk for vk in ARROW_KEYS if user32.GetAsyncKeyState(vk) & 0x8000)
+    except Exception:
+        return frozenset()

@@ -255,6 +255,79 @@ def make_pet_images(path, progress=None, split=True, max_side=512):
     return outs
 
 
+def make_group(path, progress=None, split=True, max_side=512):
+    """사진 → (전체 이미지, [(캐릭터별 이미지, (x, y)), ...])
+    여러 마리가 있으면 한 펫으로 같이 다니되, 캐릭터마다 따로 통통 튈 수 있게 조각도 같이 만듦.
+    한 마리면 조각 목록은 빈 리스트."""
+    img = _load(path)
+    if has_transparent_background(img):
+        alpha_src = np.asarray(img.getchannel("A")).astype(np.uint8)
+        parts = split_parts(alpha_src) if split else None
+    else:
+        mask = predict_mask(img, progress)
+        m = np.asarray(mask).astype(np.float32)
+        m = np.clip((m - 20) * 255 / (235 - 20), 0, 255).astype(np.uint8)
+        parts = split_parts(m) if split else None
+        if parts is None:
+            m = keep_main_parts(m)
+        soft = np.asarray(Image.fromarray(m, "L").filter(ImageFilter.GaussianBlur(0.6)))
+        alpha_src = np.minimum(np.asarray(img.getchannel("A")), soft)
+
+    if parts:
+        # 조각끼리 겹치지 않게 (왼쪽 캐릭터 우선) + 납작한 조각(막대, 글자 줄) 빼기
+        taken = np.zeros(alpha_src.shape, bool)
+        cand = []
+        for pm in parts:
+            pm = pm & ~taken
+            a = np.where(pm, alpha_src, 0)
+            ys, xs = np.nonzero(a > 15)
+            if len(xs) == 0:
+                continue
+            cand.append((pm, ys.max() - ys.min() + 1, xs.max() - xs.min() + 1))
+            taken |= pm
+        tall = max((c[1] for c in cand), default=0)
+        cand = [c for c in cand if c[1] >= tall * 0.45 and c[1] >= c[2] * 0.35]
+        parts = [c[0] for c in cand] if len(cand) >= 2 else None
+        if parts is None and cand:
+            alpha_src = np.where(cand[0][0], alpha_src, 0).astype(np.uint8)
+
+    if parts:
+        union = np.zeros(alpha_src.shape, bool)
+        for pm in parts:
+            union |= pm
+        full_a = np.where(union, alpha_src, 0).astype(np.uint8)
+    else:
+        full_a = alpha_src
+    ys, xs = np.nonzero(full_a > 15)
+    if len(xs) == 0:
+        raise ValueError("배경을 지우고 나니 남은 부분이 없어요. 다른 사진으로 해 보세요.")
+    pad = 2
+    box = (max(0, xs.min() - pad), max(0, ys.min() - pad),
+           min(img.width, xs.max() + 1 + pad), min(img.height, ys.max() + 1 + pad))
+    f = min(1.0, max_side / max(box[2] - box[0], box[3] - box[1]))
+
+    def cut(alpha):
+        one = img.copy()
+        one.putalpha(Image.fromarray(alpha.astype(np.uint8), "L"))
+        return one.crop(box)
+
+    full = cut(full_a)
+    size = (max(1, round(full.width * f)), max(1, round(full.height * f)))
+    full = full.resize(size, Image.LANCZOS)
+    out_parts = []
+    for pm in parts or []:
+        one = cut(np.where(pm, alpha_src, 0))
+        bb = one.getchannel("A").point(lambda v: 255 if v > 15 else 0).getbbox()
+        if not bb:
+            continue
+        piece = one.crop(bb)
+        piece = piece.resize((max(1, round(piece.width * f)), max(1, round(piece.height * f))), Image.LANCZOS)
+        out_parts.append((piece, (round(bb[0] * f), round(bb[1] * f))))
+    if len(out_parts) < 2:
+        out_parts = []
+    return full, out_parts
+
+
 def make_pet_image(path, progress=None, max_side=512):
     """사진 파일 → 배경 지우고 여백 잘라낸 RGBA 이미지 한 장"""
     return make_pet_images(path, progress, split=False, max_side=max_side)[0]

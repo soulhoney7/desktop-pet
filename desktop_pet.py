@@ -30,6 +30,7 @@ APP_NAME = "데스크탑 펫"
 DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "DesktopPet"
 PET_DIR = DATA_DIR / "pets"
 SETTINGS_FILE = DATA_DIR / "settings.json"
+PARTS_DIR = DATA_DIR / "parts"        # 여러 마리 사진: 캐릭터별 조각 (각자 통통 튀기용)
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".jfif", ".webp", ".bmp", ".gif", ".tif", ".tiff",
               ".heic", ".heif", ".avif", ".ico"}
 
@@ -96,18 +97,24 @@ class BackgroundRemover(QThread):
             path = Path(path)
             try:
                 self.progress.emit(f"{path.name} 배경 지우는 중… ({i}/{len(self.paths)})")
-                imgs = bgremove.make_pet_images(path, self.progress.emit, split=self.split)
+                full, parts = bgremove.make_group(path, self.progress.emit, split=self.split)
                 PET_DIR.mkdir(parents=True, exist_ok=True)
                 stem = "".join(c for c in path.stem if c not in '\\/:*?"<>|')[:30] or "pet"
-                for k, img in enumerate(imgs, 1):
-                    base = stem if len(imgs) == 1 else f"{stem}_{k}"
-                    name, n = base, 2
-                    while (PET_DIR / f"{name}.png").exists():
-                        name, n = f"{base}_{n}", n + 1
-                    img.save(PET_DIR / f"{name}.png")
-                    self.finished_one.emit(name)
-                if len(imgs) > 1:
-                    self.progress.emit(f"{path.name}: {len(imgs)}마리로 나눴어요!")
+                name, n = stem, 2
+                while (PET_DIR / f"{name}.png").exists():
+                    name, n = f"{stem}_{n}", n + 1
+                if parts:
+                    d = PARTS_DIR / name
+                    d.mkdir(parents=True, exist_ok=True)
+                    info = []
+                    for k, (piece, (x, y)) in enumerate(parts):
+                        piece.save(d / f"{k}.png")
+                        info.append({"file": f"{k}.png", "x": x, "y": y})
+                    (d / "parts.json").write_text(json.dumps({"parts": info}), encoding="utf-8")
+                full.save(PET_DIR / f"{name}.png")
+                self.finished_one.emit(name)
+                if parts:
+                    self.progress.emit(f"{path.name}: {len(parts)}마리가 같이 다녀요!")
             except Exception as e:
                 msg = str(e)
                 if "urlopen" in msg or "Errno" in msg or "timed out" in msg:
@@ -116,6 +123,16 @@ class BackgroundRemover(QThread):
 
 
 # ──────────────────────────── 펫 창 ────────────────────────────
+def load_parts(name):
+    d = PARTS_DIR / name
+    try:
+        info = json.loads((d / "parts.json").read_text(encoding="utf-8"))["parts"]
+        out = [(QPixmap(str(d / it["file"])), it["x"], it["y"]) for it in info]
+        return [o for o in out if not o[0].isNull()]
+    except Exception:
+        return []
+
+
 def screen_area(x, y):
     screen = QGuiApplication.screenAt(QPoint(int(x), int(y))) or QGuiApplication.primaryScreen()
     g = screen.availableGeometry()
@@ -132,6 +149,10 @@ class PetWindow(QWidget):
         self.name = name
         self.app_ref = app_ref
         self.source = QPixmap(str(PET_DIR / f"{name}.png"))
+        self.part_src = load_parts(name)        # [(QPixmap, x, y)] 여러 마리 사진이면 조각들
+        self.part_pix = []
+        self.part_hops = [[None, random.uniform(0.5, 2.5)] for _ in self.part_src]   # [시작시각, 다음 점프]
+        self.part_off = [0] * len(self.part_src)
         self.pix = self.source
         self.drag_offset = None
         self.drag_hist = []
@@ -159,6 +180,14 @@ class PetWindow(QWidget):
                                 Qt.SmoothTransformation)
         pm.setDevicePixelRatio(dpr)
         self.pix, self.pw, self.ph = pm, w, h
+        # 조각들도 같은 비율로 미리 줄여 두기
+        k = w / max(1, self.source.width())
+        self.part_pix = []
+        for src, x, y in self.part_src:
+            pw, ph = max(1, src.width() * k), max(1, src.height() * k)
+            spm = src.scaled(QSize(int(pw * dpr), int(ph * dpr)), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            spm.setDevicePixelRatio(dpr)
+            self.part_pix.append((spm, x * k, y * k, pw, ph))
         side = max(int(math.hypot(w, h) * 1.25) + 16, 176)     # 말풍선 들어갈 너비
         self.setFixedSize(side, side + EMO_SPACE)
         if not first:
@@ -180,13 +209,44 @@ class PetWindow(QWidget):
         area = screen_area(b.cx, b.cy)
         b.update(now, area, mouse, others, plats)
 
+    LIVELY = ("walk", "run", "train", "go_snack", "chase", "hop", "happy", "dance", "meet")
+    CALM = ("idle", "sit", "look", "to_wall", "stretch")
+
+    def hop_parts(self):
+        """여러 마리 사진: 캐릭터마다 각자 타이밍으로 통통 점프"""
+        if not self.part_pix:
+            return
+        b = self.brain
+        now = b.now
+        dur = 0.36
+        height = max(5.0, min(16.0, self.ph * 0.13))
+        for i, hop in enumerate(self.part_hops):
+            t0, nxt = hop
+            if t0 is not None and now - t0 >= dur:
+                hop[0] = t0 = None
+            if t0 is None and now >= nxt:
+                if b.state in self.LIVELY:
+                    hop[0] = now
+                    hop[1] = now + dur + random.uniform(0.15, 0.6)
+                elif b.state in self.CALM:
+                    hop[0] = now
+                    hop[1] = now + dur + random.uniform(1.0, 3.5)
+                else:                                   # 자거나 날아가는 중엔 쉼
+                    hop[1] = now + random.uniform(0.3, 1.0)
+            t0 = hop[0]
+            self.part_off[i] = 0 if t0 is None else -height * math.sin(math.pi * min(1.0, (now - t0) / dur))
+
+    def anim_busy(self):
+        return any(h[0] is not None for h in self.part_hops)
+
     def render(self):
         """바뀐 게 있을 때만 옮기고, 모양이 바뀌었을 때만 다시 그림 (CPU 절약)"""
         b = self.brain
+        self.hop_parts()
         self.place()
         em = tuple((e[0], int((b.now - e[1]) * 25)) for e in b.emotes)
         key = (round(b.angle), round(b.squash * 30), round(b.flat_now * 40), b.facing, em, self.pw, self.ph,
-               b.bubble[0] if b.bubble else None)
+               b.bubble[0] if b.bubble else None, tuple(int(o) for o in self.part_off))
         if key != self._key:
             self._key = key
             self.update()
@@ -208,7 +268,11 @@ class PetWindow(QWidget):
         p.translate(0, h / 2)               # 발끝 기준으로 찌그러지게
         p.scale(sx * b.facing, sy)
         p.translate(0, -h / 2)
-        p.drawPixmap(QRectF(-w / 2, -h / 2, w, h), self.pix, QRectF(self.pix.rect()))
+        if self.part_pix:                    # 여러 마리: 캐릭터마다 따로 통통
+            for (pm, x, y, pw, ph), off in zip(self.part_pix, self.part_off):
+                p.drawPixmap(QRectF(-w / 2 + x, -h / 2 + y + off, pw, ph), pm, QRectF(pm.rect()))
+        else:
+            p.drawPixmap(QRectF(-w / 2, -h / 2, w, h), self.pix, QRectF(self.pix.rect()))
         p.restore()
 
         # 머리 위 이모티콘 / 부딪힘 반짝이
@@ -525,8 +589,8 @@ class SettingsWindow(QWidget):
         self.fs_check.toggled.connect(app_ref.set_hide_fullscreen)
         opt_row.addWidget(self.fs_check)
         opt_row.addSpacing(16)
-        self.split_check = QCheckBox("여러 마리 사진은 나누기")
-        self.split_check.setToolTip("한 사진에 캐릭터가 여러 마리면 한 마리씩 따로 펫으로 만들어요")
+        self.split_check = QCheckBox("여러 마리 사진은 각자 통통")
+        self.split_check.setToolTip("한 사진에 캐릭터가 여러 마리면, 같이 붙어 다니면서 캐릭터마다 따로 통통 튀어요")
         self.split_check.setChecked(app_ref.settings.data.get("split", True))
         self.split_check.toggled.connect(lambda on: app_ref.set_option("split", on))
         opt_row.addWidget(self.split_check)
@@ -553,6 +617,14 @@ class SettingsWindow(QWidget):
         self.rest_check.setChecked(app_ref.settings.data.get("rest_alert", True))
         self.rest_check.toggled.connect(lambda on: app_ref.set_option("rest_alert", on))
         work_row.addWidget(self.rest_check)
+        work_row.addStretch()
+        root.addLayout(work_row)
+        work_row = QHBoxLayout()
+        self.boss_check = QCheckBox("방향키 3번 연타로 숨기기")
+        self.boss_check.setToolTip("어떤 창을 보고 있든 방향키를 빠르게 3번 누르면 펫이 싹 사라지고, 다시 3번 누르면 나와요")
+        self.boss_check.setChecked(app_ref.settings.data.get("boss_key", True))
+        self.boss_check.toggled.connect(lambda on: app_ref.set_option("boss_key", on))
+        work_row.addWidget(self.boss_check)
         work_row.addStretch()
         root.addLayout(work_row)
 
@@ -716,6 +788,7 @@ class PetApp:
         menu.addAction("간식 주기 🍪", lambda: self.drop_snack())
         menu.addAction("기차놀이 🚂", self.start_train)
         self.snooze_action = menu.addAction("30분 동안 숨기기", self.toggle_snooze)
+        self.boss_action = menu.addAction("지금 숨기기 (방향키 3번 연타)", self.toggle_boss)
         menu.addSeparator()
         menu.addAction("종료", self.quit)
         self.tray.setContextMenu(menu)
@@ -746,6 +819,13 @@ class PetApp:
         self.last_clock_check = -1.0
         self.done_events = {}            # 오늘 이미 한 퇴근 이벤트
         self.clock_offset = datetime.timedelta(0)
+        # 방향키 3번 연타 → 숨기기/보이기 (방향키만 살짝 엿봄, 아주 가벼움)
+        self.boss = False
+        self.key_prev = frozenset()
+        self.key_taps = []
+        self.key_timer = QTimer()
+        self.key_timer.timeout.connect(self.poll_keys)
+        self.key_timer.start(30)
         self.timer = QTimer()
         self.timer.setTimerType(Qt.CoarseTimer)    # 정밀 타이머보다 전력/CPU를 덜 씀
         self.timer.timeout.connect(self.tick)
@@ -891,6 +971,29 @@ class PetApp:
         self.snooze_action.setText("다시 보이기" if self.snooze_until else "30분 동안 숨기기")
         self.tick()
 
+    def poll_keys(self):
+        if not self.settings.data.get("boss_key", True):
+            return
+        down = winplat.arrows_down()
+        pressed = down - self.key_prev                # 새로 누른 키 (꾹 누르고 있는 건 한 번)
+        self.key_prev = down
+        if not pressed:
+            return
+        t = time.time()
+        self.key_taps = [x for x in self.key_taps if t - x < 0.7] + [t]
+        if len(self.key_taps) >= 3:
+            self.key_taps = []
+            self.toggle_boss()
+
+    def toggle_boss(self):
+        self.boss = not self.boss
+        if self.boss:                                 # 설정창·사용법 창도 같이 숨김
+            self.window.hide()
+            if self.help is not None:
+                self.help.hide()
+        self.boss_action.setText("다시 보이기 (방향키 3번 연타)" if self.boss else "지금 숨기기 (방향키 3번 연타)")
+        self.tick()
+
     def set_paused(self, paused):
         if paused == self.paused:
             return
@@ -911,7 +1014,7 @@ class PetApp:
             self.fullscreen = self.settings.data.get("hide_fullscreen", True) and winplat.fullscreen_foreground()
         if self.snooze_until and now >= self.snooze_until:
             self.snooze_until = 0.0
-        self.set_paused(self.fullscreen or now < self.snooze_until)
+        self.set_paused(self.boss or self.fullscreen or now < self.snooze_until)
         if self.paused:
             self.set_interval(PAUSE_TICK_MS)
             return
@@ -937,7 +1040,8 @@ class PetApp:
         self.update_snacks(now)
         self.events(now, brains)
 
-        busy = any(b.state in FAST_STATES or b.emotes or b.hop_v or b.squash > 0.05 for b in brains)
+        busy = any(b.state in FAST_STATES or b.emotes or b.hop_v or b.squash > 0.05 for b in brains) \
+            or any(p.anim_busy() for p in pets)
         self.set_interval(TICK_MS if busy or self.new_windows or self.snacks else IDLE_TICK_MS)
         if TRACE and self.frame % 15 == 0:
             try:
@@ -1190,6 +1294,8 @@ class PetApp:
         if name in self.pets:
             self.pets.pop(name).close()
         (PET_DIR / f"{name}.png").unlink(missing_ok=True)
+        import shutil
+        shutil.rmtree(PARTS_DIR / name, ignore_errors=True)
         self.settings.data["pets"].pop(name, None)
         self.settings.save()
         self.window.rebuild()

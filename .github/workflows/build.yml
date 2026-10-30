@@ -35,7 +35,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force shots | Out-Null
           python ci/test_bg.py shots/0_배경제거_시험.png *>&1 | Tee-Object shots/log_배경제거.txt
-          python ci/test_split.py shots/0_여러마리_나누기.png *>&1 | Tee-Object -Append shots/log_배경제거.txt
+          python ci/make_group_pet.py shots/0_여러마리_한펫.png *>&1 | Tee-Object -Append shots/log_배경제거.txt
           if ($LASTEXITCODE -ne 0) { throw "배경 제거 시험 실패" }
 
       - name: 가벼움 측정 (이전 버전과 비교)
@@ -47,6 +47,7 @@ jobs:
           New-Item -ItemType Directory -Force shots, old | Out-Null
           $d = "$env:APPDATA\DesktopPet\pets"
           New-Item -ItemType Directory -Force $d | Out-Null
+          Remove-Item "$d\*" -ErrorAction SilentlyContinue
           Copy-Item ci\pets\*.png $d
           '{"global_scale": 120, "pets": {}, "help_shown": true}' | Set-Content "$env:APPDATA\DesktopPet\settings.json" -Encoding utf8
           gh release download build-6 -p DesktopPet.exe -D old -R ${{ github.repository }}
@@ -60,16 +61,33 @@ jobs:
           New-Item -ItemType Directory -Force shots | Out-Null
           Get-Process DesktopPet -ErrorAction SilentlyContinue | Stop-Process -Force
           Remove-Item "$env:APPDATA\DesktopPet\running.lock" -ErrorAction SilentlyContinue
+          python ci/make_group_pet.py shots/0_여러마리_한펫.png
           $env:DESKTOPPET_DEMO = "1"
           $go = "$env:APPDATA\DesktopPet\demo_go"
           $p = Start-Process dist\DesktopPet.exe -PassThru
           Start-Sleep 22
+          python ci/record.py shots/13_여러마리_통통.gif 10
           python ci/record.py shots/7_부딪힘.gif 12 $go bump
           python ci/record.py shots/8_기차놀이.gif 14 $go train
           python ci/record.py shots/9_간식.gif 12 $go snack
           python ci/record.py shots/10_퇴근1시간전.gif 14 $go "clock 16:59:57"
           python ci/record.py shots/11_퇴근축하.gif 12 $go "clock 17:59:57"
           python ci/shot.py shots/12_퇴근축하_사진.png
+          Start-Sleep 8
+          python ci/shot.py shots/14_숨기기전.png
+          python ci/keys.py right right right
+          Start-Sleep 2
+          python ci/shot.py shots/15_방향키3번_숨김.png
+          python ci/keys.py left up left
+          Start-Sleep 2
+          python ci/shot.py shots/16_다시3번_보임.png
+          python ci/keys.py right
+          Start-Sleep 1
+          python ci/keys.py right
+          Start-Sleep 1
+          python ci/keys.py right
+          Start-Sleep 2
+          python ci/shot.py shots/17_천천히3번_그대로.png
           if (Test-Path "$env:APPDATA\DesktopPet\error.log") { Copy-Item "$env:APPDATA\DesktopPet\error.log" shots\error_demo.log }
           Get-Process DesktopPet -ErrorAction SilentlyContinue | Stop-Process -Force
           Start-Sleep 3
