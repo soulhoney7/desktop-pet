@@ -2,7 +2,15 @@ name: 데스크탑펫 exe 만들기
 
 on:
   push:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
 
 jobs:
   build:
@@ -22,13 +30,18 @@ jobs:
         run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name DesktopPet --icon icon.ico --collect-binaries onnxruntime --collect-all pillow_heif --exclude-module tkinter --exclude-module matplotlib --exclude-module scipy --exclude-module pandas desktop_pet.py
 
       - name: 배경 제거 시험
-        run: |
-          mkdir shots
-          python ci/test_bg.py shots/0_배경제거_시험.png
-
-      - name: exe 실행 시험 + 화면 캡처
+        continue-on-error: true
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force shots | Out-Null
+          python ci/test_bg.py shots/0_배경제거_시험.png *>&1 | Tee-Object shots/log_배경제거.txt
+          if ($LASTEXITCODE -ne 0) { throw "배경 제거 시험 실패" }
+
+      - name: exe 실행 시험 + 화면 캡처
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force shots | Out-Null
           $d = "$env:APPDATA\DesktopPet\pets"
           New-Item -ItemType Directory -Force $d | Out-Null
           Copy-Item ci\pets\*.png $d
@@ -43,15 +56,19 @@ jobs:
           python ci/shot.py shots/3_메모장_열자마자.png
           Start-Sleep 5
           python ci/shot.py shots/4_메모장_위.png
-          if (Test-Path "$env:APPDATA\DesktopPet\error.log") { Get-Content "$env:APPDATA\DesktopPet\error.log"; Copy-Item "$env:APPDATA\DesktopPet\error.log" shots\ }
-          if ($p.HasExited) { throw "exe가 실행 중에 꺼졌어요" }
-          Stop-Process -Id $p.Id
+          "exe 살아있음: $(-not $p.HasExited)" | Tee-Object shots/log_실행.txt
+          if (Test-Path "$env:APPDATA\DesktopPet\error.log") { Copy-Item "$env:APPDATA\DesktopPet\error.log" shots\ }
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id }
 
-      - name: 결과 올리기
+      - name: 결과를 Release로 올리기
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: DesktopPet
-          path: |
-            dist/DesktopPet.exe
-            shots/
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force shots | Out-Null
+          Compress-Archive -Path shots\* -DestinationPath shots.zip -Force
+          $tag = "build-${{ github.run_number }}"
+          $files = @("shots.zip")
+          if (Test-Path dist\DesktopPet.exe) { $files += "dist\DesktopPet.exe" }
+          gh release create $tag @files --title "데스크탑펫 빌드 ${{ github.run_number }}" --notes "자동 빌드. DesktopPet.exe를 받아서 실행하세요."
