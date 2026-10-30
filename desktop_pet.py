@@ -32,6 +32,7 @@ SETTINGS_FILE = DATA_DIR / "settings.json"
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".jfif", ".webp", ".bmp", ".gif", ".tif", ".tiff",
               ".heic", ".heif", ".avif", ".ico"}
 
+TRACE = bool(os.environ.get("DESKTOPPET_TRACE"))
 BASE_HEIGHT = 110      # 크기 100%일 때 펫 높이(px)
 TICK_MS = 30
 EMO_SPACE = 56         # 펫 머리 위 이모티콘 공간
@@ -688,6 +689,17 @@ class PetApp:
         brains = [p.brain for p in self.pets.values()]
         for pet in list(self.pets.values()):
             pet.tick(now, mouse, brains, self.plats)
+        if TRACE and self.frame % 15 == 0:
+            try:
+                with open(DATA_DIR / "trace.txt", "a", encoding="utf-8") as f:
+                    pl = {f"{k[0]}:{k[1]}": tuple(round(v) for v in val) for k, val in self.plats.items()}
+                    f.write(f"t={now:.1f} plats={pl}\n")
+                    for name, pet in self.pets.items():
+                        b = pet.brain
+                        f.write(f"   {name} {b.state} cx={b.cx:.0f} cy={b.cy:.0f} h={b.h} on={b.on} "
+                                f"vx={b.vx:.1f} vy={b.vy:.1f} leap={b.leap} area={b.area}\n")
+            except Exception:
+                pass
 
     def set_enabled(self, name, on):
         self.settings.pet(name)["enabled"] = on
