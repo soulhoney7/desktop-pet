@@ -660,7 +660,9 @@ class PetApp:
         for h, at in list(self.new_windows.items()):
             if now < at:
                 continue
-            del self.new_windows[h]
+            if now > at + 4:                          # 4초 동안 못 올라가면 포기
+                del self.new_windows[h]
+                continue
             keys = [k for k in plats if k[0] == h]
             if not keys:
                 continue
@@ -673,6 +675,8 @@ class PetApp:
                     jumped += 1
                     if jumped >= 2 or random.random() < 0.6:
                         break
+            if jumped:                                # 누가 뛰었으면 끝, 아니면 잠시 뒤 다시 시도
+                del self.new_windows[h]
         self.plats = plats
 
     def set_window_play(self, on):
