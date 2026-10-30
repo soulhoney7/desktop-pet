@@ -849,12 +849,14 @@ class PetApp:
         self.key_taps = []
         self.key_timer = QTimer()
         self.key_timer.timeout.connect(self.poll_keys)
-        self.key_timer.start(30)                   # 예비용 (Raw Input이 되면 멈춤)
+        self.key_timer.start(30)                   # 예비용 (Raw Input이 확인되면 멈춤)
         self.raw_seen = False
         self.raw_down = set()
         self.key_win = QWidget()                   # 화면에 안 보이는 키 수신용 창
         self.key_win.setAttribute(Qt.WA_DontShowOnScreen)
         self.raw_ok = winplat.register_raw_keyboard(int(self.key_win.winId()))
+        if self.raw_ok:
+            self.key_timer.setInterval(100)          # Raw Input이 주력, 예비 감시는 느긋하게
         self.key_filter = RawKeyFilter(self.on_raw_key)
         qapp.installNativeEventFilter(self.key_filter)
         self.key_log("raw_input_registered=%s" % self.raw_ok)
@@ -1427,9 +1429,11 @@ class PetApp:
 
 def take_over(lock):
     """이미 켜져 있는(예전 버전일 수도 있는) 데스크탑 펫을 끄고 잠금을 가져옴"""
+    pid = 0
     try:
-        info = lock.getLockInfo()
-        pid = int(info[1]) if isinstance(info, (tuple, list)) and info[0] else 0
+        # 잠금 파일 첫 줄에 켜져 있는 프로그램 번호(PID)가 적혀 있음 (예전 버전도 같음)
+        first = (DATA_DIR / "running.lock").read_text(encoding="utf-8", errors="ignore").splitlines()[0]
+        pid = int(first.strip())
     except Exception:
         pid = 0
     if pid and pid != os.getpid():
@@ -1438,8 +1442,8 @@ def take_over(lock):
             os.kill(pid, signal.SIGTERM)          # 윈도우에선 그 프로그램을 바로 끔
         except Exception:
             pass
-    for _ in range(30):
-        time.sleep(0.2)
+    for _ in range(40):
+        time.sleep(0.25)
         lock.removeStaleLockFile()
         if lock.tryLock(100):
             return True
