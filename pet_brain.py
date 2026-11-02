@@ -862,7 +862,7 @@ class Train:
         return True
 
 
-def start_train(brains, now, rng=random, leader=None):
+def start_train(brains, now, rng=random, leader=None, duration=None):
     """바닥에 있는 한가한 펫들이 줄지어 칙칙폭폭. leader를 주면 그 펫이 대장"""
     for b in brains:                                 # 이미 달리는 기차는 끝내고 새로
         if b.train is not None:
@@ -886,7 +886,8 @@ def start_train(brains, now, rng=random, leader=None):
     members = [leader] + others
     l, t, r, _ = leader.area or (0, 0, 1920, 1080)
     leader.facing = 1 if (r - leader.cx) > (leader.cx - l) else -1
-    tr = Train(members, now + rng.uniform(30, 45), rng.uniform(1.9, 2.4))
+    secs = rng.uniform(30, 45) if duration is None else duration * rng.uniform(0.9, 1.1)
+    tr = Train(members, now + secs, rng.uniform(1.9, 2.4))
     for m in members:
         m.now = now
         m.train = tr

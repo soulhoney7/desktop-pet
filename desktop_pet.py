@@ -47,6 +47,10 @@ OFFWORK_LINES = ["퇴근까지 {m}분!", "조금만 더 힘내요!", "하암… 
                  "칼퇴 가즈아!", "집에 가고 싶다…", "오늘도 고생 많았어요 ♥", "퇴근까지 {m}분 남았어요"]
 EMO_SPACE = 56         # 펫 머리 위 이모티콘 공간
 PINK = "#f06292"
+TRAIN_EVERY_CHOICES = [1, 2, 3, 4, 5, 10, 15, 20, 30, 60]
+TRAIN_LEN_CHOICES = [(20, "20초"), (40, "40초"), (60, "1분"), (90, "1분 30초"), (120, "2분"),
+                     (180, "3분"), (300, "5분"), (600, "10분")]
+REST_CHOICES = [20, 30, 40, 50, 60, 90, 120]
 EMO_COLORS = {}
 EMO_FONTS = {}
 BUBBLE_FONT = None
@@ -666,13 +670,42 @@ class SettingsWindow(QWidget):
         self.end_combo.currentTextChanged.connect(lambda t: app_ref.set_option("work_end", t))
         work_row.addWidget(self.end_combo)
         work_row.addSpacing(16)
-        self.rest_check = QCheckBox("50분마다 쉬는 시간 알림")
-        self.rest_check.setToolTip("50분마다 펫이 기지개를 켜며 잠깐 쉬자고 말해요")
+        self.rest_check = QCheckBox("쉬는 시간 알림")
+        self.rest_check.setToolTip("정해 둔 시간마다 펫이 기지개를 켜며 잠깐 쉬자고 말해요")
         self.rest_check.setChecked(app_ref.settings.data.get("rest_alert", True))
         self.rest_check.toggled.connect(lambda on: app_ref.set_option("rest_alert", on))
         work_row.addWidget(self.rest_check)
+        self.rest_combo = self.minute_combo(REST_CHOICES, app_ref.settings.data.get("rest_every", 50),
+                                            lambda v: app_ref.set_option("rest_every", v, reset="rest"))
+        work_row.addWidget(self.rest_combo)
+        work_row.addWidget(QLabel("마다"))
         work_row.addStretch()
         root.addLayout(work_row)
+
+        # 기차놀이 설정
+        train_row = QHBoxLayout()
+        self.train_check = QCheckBox("저절로 기차놀이")
+        self.train_check.setToolTip("정해 둔 시간마다 펫들이 알아서 기차놀이를 해요 (우클릭으로 시키는 건 언제든 돼요)")
+        self.train_check.setChecked(app_ref.settings.data.get("train_auto", True))
+        self.train_check.toggled.connect(lambda on: app_ref.set_option("train_auto", on))
+        train_row.addWidget(self.train_check)
+        self.train_every_combo = self.minute_combo(TRAIN_EVERY_CHOICES, app_ref.settings.data.get("train_every", 4),
+                                                   lambda v: app_ref.set_option("train_every", v, reset="train"))
+        train_row.addWidget(self.train_every_combo)
+        train_row.addWidget(QLabel("마다"))
+        train_row.addSpacing(16)
+        train_row.addWidget(QLabel("한 번 달리는 시간"))
+        self.train_len_combo = QComboBox()
+        cur_len = app_ref.settings.data.get("train_len", 40)
+        for secs, label in TRAIN_LEN_CHOICES:
+            self.train_len_combo.addItem(label, secs)
+        idx = self.train_len_combo.findData(cur_len)
+        self.train_len_combo.setCurrentIndex(idx if idx >= 0 else 1)
+        self.train_len_combo.currentIndexChanged.connect(
+            lambda i: app_ref.set_option("train_len", self.train_len_combo.itemData(i)))
+        train_row.addWidget(self.train_len_combo)
+        train_row.addStretch()
+        root.addLayout(train_row)
         work_row = QHBoxLayout()
         self.boss_check = QCheckBox("방향키 3번 연타로 숨기기")
         self.boss_check.setToolTip("어떤 창을 보고 있든 방향키를 빠르게 3번 누르면 펫이 싹 사라지고, 다시 3번 누르면 나와요")
@@ -701,6 +734,18 @@ class SettingsWindow(QWidget):
         quit_btn.clicked.connect(app_ref.quit)
         bottom.addWidget(quit_btn, 0, Qt.AlignBottom)
         root.addLayout(bottom)
+
+    def minute_combo(self, choices, current, on_change):
+        box = QComboBox()
+        for m in choices:
+            box.addItem(f"{m}분", m)
+        idx = box.findData(current)
+        if idx < 0:
+            box.addItem(f"{current}분", current)
+            idx = box.count() - 1
+        box.setCurrentIndex(idx)
+        box.currentIndexChanged.connect(lambda i: on_change(box.itemData(i)))
+        return box
 
     def cols(self):
         return max(1, (self.scroll.viewport().width() - 10) // 160)
@@ -881,8 +926,8 @@ class PetApp:
         self.snooze_until = 0.0
         self.paused = False
         self.snacks = []                 # [(Snack, SnackWindow)]
-        self.next_train = random.uniform(90, 200)
-        self.next_rest = 50 * 60
+        self.next_train = self.train_interval() * random.uniform(0.4, 0.8)
+        self.next_rest = self.settings.data.get("rest_every", 50) * 60
         self.next_chat = 0.0
         self.last_clock_check = -1.0
         self.done_events = {}            # 오늘 이미 한 퇴근 이벤트
@@ -1371,7 +1416,8 @@ class PetApp:
         leader = self.pets[name].brain if name in self.pets else None
         if leader is not None and leader_name is None and not leader.is_free():
             leader = None
-        start_train([p.brain for p in self.pets.values()], self.now(), leader=leader)
+        start_train([p.brain for p in self.pets.values()], self.now(), leader=leader,
+                    duration=self.settings.data.get("train_len", 40))
 
     def set_train_leader(self, name):
         cur = self.settings.data.get("train_leader")
@@ -1392,22 +1438,24 @@ class PetApp:
     def events(self, now, brains):
         if not brains:
             return
-        # 가끔 저절로 기차놀이
+        # 정해 둔 간격마다 저절로 기차놀이
         if now >= self.next_train:
-            self.next_train = now + random.uniform(150, 360)
-            if len(brains) >= 2 and random.random() < 0.7:
+            self.next_train = now + self.train_interval()
+            if self.settings.data.get("train_auto", True) and len(brains) >= 2 \
+                    and not any(b.train is not None for b in brains):
                 self.start_train()
 
-        # 50분마다 쉬는 시간
+        # 정해 둔 간격마다 쉬는 시간
+        rest_min = self.settings.data.get("rest_every", 50)
         if now >= self.next_rest:
             if not self.settings.data.get("rest_alert", True):
-                self.next_rest = now + 50 * 60
+                self.next_rest = now + rest_min * 60
             else:
                 free = self.free_brains(brains)
                 if free:
-                    self.next_rest = now + 50 * 60
+                    self.next_rest = now + rest_min * 60
                     first = random.choice(free)
-                    first.stretch(random.choice(["50분 지났어요! 잠깐 쉬어요 ☕", "기지개 쭉~ 쉬었다 해요",
+                    first.stretch(random.choice([f"{rest_min}분 지났어요! 잠깐 쉬어요 ☕", "기지개 쭉~ 쉬었다 해요",
                                                  "눈 좀 쉬어 줘요 👀", "물 한 잔 마셔요 💧"]))
                     for b in free:
                         if b is not first and random.random() < 0.6:
@@ -1485,9 +1533,18 @@ class PetApp:
             b.emote("✦", 0.8, dx=20, style="burst")
             b.say("퇴근이다!! 🎉" if b is lead else random.choice(["수고했어요 ♥", "오늘도 최고!", "집에 가자~"]), 4.5)
 
-    def set_option(self, key, value):
+    def set_option(self, key, value, reset=None):
         self.settings.data[key] = value
         self.settings.save()
+        now = self.now()
+        if reset == "train":                       # 간격을 바꾸면 그 간격부터 다시 셈
+            self.next_train = now + self.train_interval()
+        elif reset == "rest":
+            self.next_rest = now + value * 60
+
+    def train_interval(self):
+        """기차놀이 간격(초): 정한 시간 ±20% 정도로 살짝 들쭉날쭉"""
+        return self.settings.data.get("train_every", 4) * 60 * random.uniform(0.8, 1.2)
 
     def set_interval(self, ms):
         if self.timer.interval() != ms:
