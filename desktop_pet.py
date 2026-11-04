@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QAbstractNativeEventFilter, QLockFile, QPoint, QPointF, QRectF, QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QFont, QGuiApplication, QIcon, QKeySequence, QPainter, QPixmap
+from PySide6.QtGui import QColor, QPainterPath, QPen, QCursor, QFont, QGuiApplication, QIcon, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, 
     QLabel, QMenu, QMessageBox, QPushButton, QScrollArea, QSlider,
@@ -348,12 +348,20 @@ class PetWindow(QWidget):
         # 머리 위 이모티콘 / 부딪힘 반짝이
         now = b.now
         head_y = cy - h / 2 - 2 if abs(b.angle) < 45 else cy - w / 2 - 2
-        if b.state == "balloon":                     # 풍선 타고 둥실
-            sway = math.sin(b.phase * 1.7) * 4
-            p.setPen(QColor(150, 150, 160))
-            p.drawLine(QPointF(cx, head_y + 4), QPointF(cx + sway, head_y - 20))
-            p.setFont(QFont("Segoe UI Emoji", 17))
-            p.drawText(QRectF(cx + sway - 18, head_y - 50, 36, 34), Qt.AlignCenter, "🎈")
+        if b.state == "balloon":                     # 풍선 타고 둥실 (직접 그린 풍선)
+            sway = math.sin(b.phase * 1.7) * 5
+            bx, by = cx + sway, head_y - 34              # 풍선 가운데
+            path = QPainterPath(QPointF(cx, head_y + 6))
+            path.quadTo(QPointF(cx + sway * 0.2 - 6, head_y - 6), QPointF(bx, by + 15))
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(140, 140, 150), 1.3))
+            p.drawPath(path)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 110, 150))
+            p.drawPolygon([QPointF(bx - 3, by + 16), QPointF(bx + 3, by + 16), QPointF(bx, by + 12)])
+            p.drawEllipse(QPointF(bx, by), 13, 15)
+            p.setBrush(QColor(255, 255, 255, 170))
+            p.drawEllipse(QPointF(bx - 5, by - 6), 3.5, 5)
         for text, t0, dur, dx, style in b.emotes:
             k = (now - t0) / dur
             if not 0 <= k <= 1:
@@ -379,7 +387,7 @@ class PetWindow(QWidget):
             if text == "z":
                 size = int(8 + k * 5)
             elif word:
-                size = int(11 * pop)
+                size = int(12 * pop)
             else:
                 size = int(12 * pop)
             if emoji:
