@@ -42,7 +42,8 @@ IDLE_TICK_MS = 90       # 다들 가만히 있을 때 (초당 11번) → CPU 절
 PAUSE_TICK_MS = 1000    # 전체화면/숨김 중
 SCAN_EVERY = 0.4        # 열린 창 목록 전체 검색 간격(초)
 FAST_STATES = ("air", "drag", "walk", "run", "chase", "hop", "dance", "to_wall", "climb", "hang",
-               "crouch", "meet", "happy", "dizzy", "go_snack", "eat", "train", "stretch")
+               "crouch", "meet", "happy", "dizzy", "go_snack", "eat", "train", "stretch",
+               "balloon", "roll", "to_edge", "peek", "ceiling", "chase_pet", "flee")
 OFFWORK_LINES = ["퇴근까지 {m}분!", "조금만 더 힘내요!", "하암… 졸려", "오늘 저녁 뭐 먹지?",
                  "칼퇴 가즈아!", "집에 가고 싶다…", "오늘도 고생 많았어요 ♥", "퇴근까지 {m}분 남았어요"]
 EMO_SPACE = 56         # 펫 머리 위 이모티콘 공간
@@ -57,13 +58,31 @@ BUBBLE_FONT = None
 FOODS = ["🍪", "🍩", "🍙", "🍓", "🍰", "🍗", "🍦", "🥐"]
 
 
+CUTE_FONT = "Malgun Gothic"
+
+
+def load_cute_font():
+    """귀여운 한글 글꼴(배민 주아체 계열 'Jua', 무료 OFL) 불러오기. 없으면 맑은 고딕"""
+    from PySide6.QtGui import QFontDatabase
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    path = base / "fonts" / "Jua-Regular.ttf"
+    if path.exists():
+        fid = QFontDatabase.addApplicationFont(str(path))
+        fams = QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
+        if fams:
+            return fams[0]
+    return "Malgun Gothic"
+
+
 def init_emote_style():
     EMO_COLORS.update({"♥": QColor(240, 80, 120), "♪": QColor(90, 120, 230), "★": QColor(250, 190, 30),
                        "!": QColor(235, 70, 60), "?": QColor(80, 140, 230), "z": QColor(120, 120, 160),
                        "콩!": QColor(255, 105, 150), "뿅!": QColor(160, 110, 240)})
-    EMO_FONTS["small"] = QFont("Segoe UI Symbol", 11, QFont.Bold)
-    global BUBBLE_FONT
-    BUBBLE_FONT = QFont("Malgun Gothic", 10, QFont.Bold)
+    EMO_FONTS["small"] = QFont("Segoe UI Symbol", 9, QFont.Bold)
+    global BUBBLE_FONT, CUTE_FONT
+    CUTE_FONT = load_cute_font()
+    BUBBLE_FONT = QFont(CUTE_FONT, 10)
+    EMO_COLORS.update({"펑!": QColor(255, 140, 60)})
     EMO_COLORS.update({"냠": QColor(240, 130, 60), "하암": QColor(140, 130, 170)})
 
 
@@ -296,7 +315,8 @@ class PetWindow(QWidget):
         self.place()
         em = tuple((e[0], int((b.now - e[1]) * 25)) for e in b.emotes)
         key = (round(b.angle), round(b.squash * 30), round(b.flat_now * 40), b.facing, em, self.pw, self.ph,
-               b.bubble[0] if b.bubble else None, tuple(int(o) for o in self.part_off))
+               b.bubble[0] if b.bubble else None, tuple(int(o) for o in self.part_off),
+               int(b.phase * 6) if b.state == "balloon" else None)
         if key != self._key:
             self._key = key
             self.update()
@@ -328,6 +348,12 @@ class PetWindow(QWidget):
         # 머리 위 이모티콘 / 부딪힘 반짝이
         now = b.now
         head_y = cy - h / 2 - 2 if abs(b.angle) < 45 else cy - w / 2 - 2
+        if b.state == "balloon":                     # 풍선 타고 둥실
+            sway = math.sin(b.phase * 1.7) * 4
+            p.setPen(QColor(150, 150, 160))
+            p.drawLine(QPointF(cx, head_y + 4), QPointF(cx + sway, head_y - 20))
+            p.setFont(QFont("Segoe UI Emoji", 17))
+            p.drawText(QRectF(cx + sway - 18, head_y - 50, 36, 34), Qt.AlignCenter, "🎈")
         for text, t0, dur, dx, style in b.emotes:
             k = (now - t0) / dur
             if not 0 <= k <= 1:
@@ -344,13 +370,24 @@ class PetWindow(QWidget):
                 continue
             alpha = int(255 * (1 - max(0, k - 0.6) / 0.4))
             pop = 1.0
-            if text in ("콩!", "뿅!"):
-                pop = 1.0 + 0.5 * max(0.0, 1 - k * 5)          # 처음에 크게 뿅
-            y = head_y - 6 - k * 34
-            x = cx + dx + (math.sin(k * 9) * 4 if text in ("z", "♪") else 0)
-            size = int(12 + k * 8) if text == "z" else int(19 * pop)
-            emoji = text in ("💦", "💢")
-            font = QFont("Segoe UI Emoji" if emoji else "Malgun Gothic", size, QFont.Bold)
+            if text in ("콩!", "뿅!", "펑!"):
+                pop = 1.0 + 0.25 * max(0.0, 1 - k * 5)         # 처음에 살짝 뿅
+            y = head_y - 4 - k * 26
+            x = cx + dx + (math.sin(k * 9) * 3 if text in ("z", "♪") else 0)
+            emoji = text in ("💦", "💢", "🎉")
+            word = any("가" <= ch <= "힣" for ch in text)     # 한글 글자는 귀여운 글꼴로 작게
+            if text == "z":
+                size = int(8 + k * 5)
+            elif word:
+                size = int(11 * pop)
+            else:
+                size = int(12 * pop)
+            if emoji:
+                font = QFont("Segoe UI Emoji", size)
+            elif word or text in ("z", "!", "?"):
+                font = QFont(CUTE_FONT, size)
+            else:
+                font = QFont("Segoe UI Symbol", size, QFont.Bold)
             p.setFont(font)
             half = p.fontMetrics().horizontalAdvance(text) / 2
             color = EMO_COLORS.get(text, QColor(80, 160, 230))
@@ -450,8 +487,23 @@ class PetWindow(QWidget):
             b.speed = 3
             b.set_state("to_wall", 15, 15)
 
+        def roll():
+            b.angle = 0
+            b.speed = random.uniform(4, 5.5)
+            b.set_state("roll", 1.5, 2.5)
+
+        def balloon():
+            if b.on is not None:
+                b.on = None
+            b.start_balloon()
+
+        def tag():
+            if not b.start_tag():
+                b.say("같이 놀 친구가 없어…", 2.2)
+
         for text, fn in (("점프!", b.jump), ("공중제비", lambda: b.jump(flip=True)),
-                         ("춤추기 ♪", dance), ("재우기 z", sleep), ("벽 타기", climb)):
+                         ("춤추기 ♪", dance), ("재우기 z", sleep), ("벽 타기", climb),
+                         ("풍선 타기 🎈", balloon), ("데굴데굴", roll), ("술래잡기 🏃", tag)):
             a = menu.addAction(text, act(fn))
             a.setEnabled(free)
         menu.addSeparator()
@@ -1333,6 +1385,29 @@ class PetApp:
                     if b.state == "sleep":
                         b.set_state("idle", 99, 99)
             QTimer.singleShot(1500, wake)
+        elif what == "moves":
+            names = sorted(self.pets)
+            brains = [self.pets[n].brain for n in names]
+            area = screen_area(brains[0].cx, brains[0].cy)
+            for k, b in enumerate(brains):
+                b.on = None
+                b.angle = b.flat = 0
+                b.cx = area[0] + 140 + k * 170
+                b.set_state("idle", 99, 99)
+            brains[0].start_balloon()
+            if len(brains) > 1:
+                brains[1].angle = 0
+                brains[1].facing, brains[1].speed = -1, 3
+                brains[1].set_state("to_wall", 15, 15)       # 벽 타고 → 천장
+            if len(brains) > 3:
+                brains[2].start_tag()
+            if len(brains) > 4:
+                brains[4].speed = 5
+                brains[4].set_state("roll", 2.5, 2.5)
+            if len(brains) > 5:
+                brains[5].facing = 1
+                brains[5].speed = 3
+                brains[5].set_state("to_edge", 20, 20)
         elif what == "snack":
             self.drop_snack()
         elif what.startswith("clock "):          # 예: clock 16:59:57 → 시계를 그 시각으로

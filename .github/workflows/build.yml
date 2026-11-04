@@ -29,8 +29,16 @@ jobs:
       - name: 버전 번호 넣기
         run: python -c "open('build_info.py','w').write('BUILD = ${{ github.run_number }}\n')"
 
+      - name: 귀여운 글꼴 받기 (Jua, OFL 무료 글꼴)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force fonts | Out-Null
+          Invoke-WebRequest "https://raw.githubusercontent.com/google/fonts/main/ofl/jua/Jua-Regular.ttf" -OutFile fonts/Jua-Regular.ttf
+          Invoke-WebRequest "https://raw.githubusercontent.com/google/fonts/main/ofl/jua/OFL.txt" -OutFile fonts/OFL-Jua.txt
+          Get-ChildItem fonts
+
       - name: exe 만들기
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name DesktopPet --icon icon.ico --collect-binaries onnxruntime --collect-all pillow_heif --exclude-module tkinter --exclude-module matplotlib --exclude-module scipy --exclude-module pandas desktop_pet.py
+        run: python -m PyInstaller --add-data "fonts;fonts" --noconfirm --clean --onefile --windowed --name DesktopPet --icon icon.ico --collect-binaries onnxruntime --collect-all pillow_heif --exclude-module tkinter --exclude-module matplotlib --exclude-module scipy --exclude-module pandas desktop_pet.py
 
       - name: 배경 제거 시험
         continue-on-error: true
@@ -80,6 +88,7 @@ jobs:
           Get-Process DesktopPet | ForEach-Object { "  " + $_.Path } | Tee-Object -FilePath shots/교체시험.txt -Append
           python ci/record.py shots/13_여러마리_통통.gif 10
           python ci/record.py shots/7_부딪힘.gif 12 $go bump
+          python ci/record.py shots/7b_새동작.gif 22 $go moves
           python ci/record.py shots/8_기차놀이.gif 34 $go train
           python ci/record.py shots/9_간식.gif 12 $go snack
           python ci/record.py shots/10_퇴근1시간전.gif 14 $go "clock 16:59:57"

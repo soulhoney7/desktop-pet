@@ -12,19 +12,27 @@ GRAVITY = 0.9
 BEHAVIORS = {
     "walk": 30, "run": 8, "idle": 18, "hop": 8, "jump": 6, "flip": 4,
     "dance": 6, "sleep": 5, "look": 6, "chase": 4, "climb": 6, "sit": 6,
-    "window": 12,   # 열린 창 위로 뛰어오르기 (갈 수 있는 창이 있을 때만)
+    "window": 18,   # 열린 창 위로 뛰어오르기 (갈 수 있는 창이 있을 때만)
+    "balloon": 4,   # 풍선 타고 둥실 날아오르기
+    "roll": 4,      # 데굴데굴 구르기
+    "peek": 4,      # 화면 끝에 숨어서 빼꼼
+    "tag": 6,       # 다른 펫이랑 술래잡기
 }
 
 # 바닥(화면 아래나 창 위)에 서 있는 상태들
 GROUND_STATES = ("idle", "walk", "run", "sit", "sleep", "hop", "dance", "look", "chase",
-                 "to_wall", "meet", "happy", "dizzy", "crouch", "go_snack", "eat", "train", "stretch")
+                 "to_wall", "meet", "happy", "dizzy", "crouch", "go_snack", "eat", "train", "stretch",
+                 "roll", "to_edge", "chase_pet", "flee")
+# 바닥에 붙어 있지 않아서 바닥 맞추기·화면 안 가두기를 하지 않는 상태
+FREE_POS = ("drag", "climb", "hang", "ceiling", "balloon", "peek")
 
 EMOTE = {"heart": "♥", "note": "♪", "z": "z", "q": "?", "ex": "!", "star": "★", "sweat": "💦",
-         "bonk": "콩!", "boing": "뿅!", "angry": "💢", "yum": "냠", "yawn": "하암", "party": "🎉"}
+         "bonk": "콩!", "boing": "뿅!", "angry": "💢", "yum": "냠", "yawn": "하암", "party": "🎉",
+         "pop": "펑!"}
 
 # 서로 밀어낼 수 있는 상태 / 앞으로 걸어가는 상태
-CONTACT_SKIP = ("drag", "climb", "hang")
-MOVING = ("walk", "run", "chase", "to_wall", "hop", "go_snack")
+CONTACT_SKIP = ("drag", "climb", "hang", "ceiling", "balloon", "peek")
+MOVING = ("walk", "run", "chase", "to_wall", "hop", "go_snack", "roll", "to_edge")
 # 펫이 바로 다른 일을 시작해도 되는 (한가한) 상태
 FREE_STATES = ("idle", "walk", "run", "sit", "look", "hop", "chase", "dance", "sleep")
 
@@ -61,6 +69,10 @@ class PetBrain:
         self.snack = None           # 쫓아가는 간식
         self.train = None           # 기차놀이 중이면 Train
         self.sleepy = False         # 퇴근임박: 졸림
+        self.target_x = None        # 걸어갈 목표 지점 (흩어져 돌아다니기)
+        self._others = ()
+        self.tag = None             # 술래잡기 상대
+        self.drift = 0.0            # 풍선 좌우 흔들림
         self.strokes = 0
         self.meet_cool = 0.0
         self.partner = None
@@ -128,6 +140,7 @@ class PetBrain:
         if plats is not None:
             self.plats = plats
         self.area = area
+        self._others = others
         # 올라가 있는 창이 움직이면 같이 이동, 없어지면 떨어짐
         if self.on is not None:
             p = self.plats.get(self.on)
@@ -153,7 +166,7 @@ class PetBrain:
 
         getattr(self, "s_" + self.state, self.s_idle)(area, ground, mouse, others)
 
-        if self.state in ("air", "drag", "climb", "hang"):
+        if self.state in ("air", "drag", "climb", "hang", "ceiling", "balloon"):
             self.on = None
         elif self.on is not None and self.state in GROUND_STATES:
             # 창 끝으로 걸어나가면 떨어짐
@@ -172,8 +185,8 @@ class PetBrain:
                 self.hop_y, self.hop_v = 0.0, 0.0
                 self.squash = max(self.squash, 0.35)
 
-        # 화면 밖으로 나가지 않게 (드래그 중 제외)
-        if self.state not in ("drag", "climb", "hang"):
+        # 화면 밖으로 나가지 않게 (드래그·벽·천장·풍선·빼꼼 중 제외)
+        if self.state not in FREE_POS:
             half = max(self.w, self.h) / 2 if abs(self.angle) > 20 else self.w / 2
             self.cx = min(max(self.cx, l + half), r - half)
             if self.state != "air":
@@ -198,11 +211,31 @@ class PetBrain:
         name = self.rng.choices(list(weights), list(weights.values()))[0]
         self.idle_streak = self.idle_streak + 1 if name in ("idle", "sit") else 0
 
+        if name == "balloon" and (self.on is not None or self.rng.random() < 0.3):
+            name = "walk"                          # 풍선은 바닥에서만, 너무 자주 안 뜨게
+        if name == "peek" and self.on is not None:
+            name = "walk"
+        if name == "tag" and not self.start_tag():
+            name = "walk"
         if name in ("walk", "run"):
-            if self.rng.random() < 0.4:
+            self.target_x = self.pick_spot()
+            self.facing = 1 if self.target_x > self.cx else -1
+            self.speed = self.rng.uniform(0.9, 1.9) if name == "walk" else self.rng.uniform(3.5, 5.5)
+            self.set_state(name, 4, 12) if name == "walk" else self.set_state(name, 1.5, 4)
+        elif name == "tag":
+            pass
+        elif name == "balloon":
+            self.start_balloon()
+        elif name == "roll":
+            self.speed = self.rng.uniform(3.5, 5.5)
+            if self.rng.random() < 0.5:
                 self.facing = -self.facing
-            self.speed = self.rng.uniform(0.8, 1.8) if name == "walk" else self.rng.uniform(3.5, 5.5)
-            self.set_state(name, 2, 7) if name == "walk" else self.set_state(name, 1.2, 3)
+            self.set_state("roll", 1.2, 2.6)
+        elif name == "peek":
+            l, t, r, b = self.area or (0, 0, 1920, 1080)
+            self.facing = -1 if self.cx < (l + r) / 2 else 1   # 가까운 화면 끝으로
+            self.speed = self.rng.uniform(2.2, 3.2)
+            self.set_state("to_edge", 20, 20)
         elif name == "idle":
             self.set_state("idle", 1.5, 4)
         elif name == "sit":
@@ -232,6 +265,191 @@ class PetBrain:
             self.facing = self.rng.choice([-1, 1])
             self.speed = self.rng.uniform(2, 3)
             self.set_state("to_wall", 15, 15)
+
+    # ───── 흩어져 돌아다니기 ─────
+    def pick_spot(self):
+        """다른 펫들과 되도록 떨어진 곳을 골라 그쪽으로 걸어감"""
+        l, t, r, b = self.area or (0, 0, 1920, 1080)
+        lo, hi = l + self.w, r - self.w
+        p = self.plats.get(self.on) if self.on is not None else None
+        if p is not None:
+            lo, hi = p[0] + self.w * 0.6, p[1] - self.w * 0.6
+        if hi <= lo:
+            return self.cx
+        mates = [o.cx for o in self._others if o is not self and o.on == self.on]
+        best, best_d = None, -1
+        for _ in range(6):
+            x = self.rng.uniform(lo, hi)
+            if abs(x - self.cx) < self.w:          # 너무 가까운 곳은 별로
+                continue
+            d = min((abs(x - m) for m in mates), default=9999)
+            if d > best_d:
+                best, best_d = x, d
+        return best if best is not None else self.rng.uniform(lo, hi)
+
+    # ───── 풍선 타고 둥실 ─────
+    def start_balloon(self):
+        l, t, r, b = self.area or (0, 0, 1920, 1080)
+        self.flat = 0.0
+        self.angle = 0.0
+        self.target = t + (b - t) * self.rng.uniform(0.12, 0.45)
+        self.drift = self.facing * self.rng.uniform(0.6, 1.4)
+        self.set_state("balloon", 7, 14)
+        self.emote("ex", 0.8)
+        if self.rng.random() < 0.6:
+            self.say(self.rng.choice(["둥실~ 🎈", "날아간다~", "높이높이!"]), 2.4)
+
+    def s_balloon(self, area, ground, mouse, others):
+        l, t, r, b = area
+        self.phase += 0.05
+        rise = (self.cy - self.target) * 0.02
+        self.cy -= max(0.0, min(1.8, rise + 0.3)) if self.cy > self.target else 0
+        self.cy += math.sin(self.phase * 1.3) * 0.3      # 살랑살랑
+        self.cx += self.drift * (0.6 + 0.4 * math.sin(self.phase))
+        if self.cx < l + self.w / 2 or self.cx > r - self.w / 2:
+            self.drift = -self.drift
+            self.facing = 1 if self.drift > 0 else -1
+            self.cx = min(max(self.cx, l + self.w / 2), r - self.w / 2)
+        self.angle = 7 * math.sin(self.phase * 0.9)
+        if self.now > self.until:
+            self.emote("pop", 1.0)                         # 펑! 풍선이 터지고 떨어짐
+            self.angle = 0.0
+            self.vx, self.vy, self.spin = self.drift, -2.0, 0.0
+            self.state = "air"
+            self.log("pop")
+
+    # ───── 데굴데굴 ─────
+    def s_roll(self, area, ground, mouse, others):
+        l, t, r, b = area
+        self.cx += self.facing * self.speed
+        self.angle = (self.angle + self.facing * self.speed / max(10.0, self.h / 2) * 57.3) % 360
+        if self.cx <= l + self.h / 2 or self.cx >= r - self.h / 2:
+            self.facing = -self.facing
+        if self.now > self.until:
+            self.angle = 0.0
+            self.squash = 0.5
+            if self.rng.random() < 0.35:
+                self.set_state("dizzy", 1.5, 2.5)
+                self.emote("star", 2.0)
+            else:
+                self.set_state("idle", 0.8, 1.5)
+
+    # ───── 화면 끝에 숨어서 빼꼼 ─────
+    def s_to_edge(self, area, ground, mouse, others):
+        l, t, r, b = area
+        self.cx += self.facing * self.speed
+        self.phase += 0.2
+        self.bob = abs(math.sin(self.phase * 1.4)) * 4
+        if self.cx <= l + self.w / 2 + 1 or self.cx >= r - self.w / 2 - 1 or self.now > self.until:
+            self.set_state("peek", 3.5, 7)
+            self.target = (l - self.w * 0.12) if self.facing < 0 else (r + self.w * 0.12)
+
+    def s_peek(self, area, ground, mouse, others):
+        l, t, r, b = area
+        self.cy = ground
+        hiding = self.now < self.until
+        if hiding:
+            d = self.target - self.cx
+            self.cx += max(-1.2, min(1.2, d))
+            self.facing = 1 if self.cx < (l + r) / 2 else -1      # 화면 안쪽을 빼꼼 바라봄
+            self.bob = 0
+            if abs(d) < 2 and self.rng.random() < 0.012:
+                self.emote(self.rng.choice(["q", "heart", "note"]), 1.2)
+        else:
+            inside = self.cx + self.facing * 1.6
+            self.cx = inside
+            if l + self.w / 2 <= self.cx <= r - self.w / 2:
+                self.emote("ex", 0.8)
+                self.set_state("idle", 0.5, 1.2)
+
+    # ───── 천장 걷기 ─────
+    def s_ceiling(self, area, ground, mouse, others):
+        l, t, r, b = area
+        self.cy = t + self.h / 2
+        self.angle = 180.0
+        self.cx += self.drift
+        self.facing = -1 if self.drift > 0 else 1        # 거꾸로 매달려서 보이는 방향 맞추기
+        self.phase += 0.15
+        self.bob = -abs(math.sin(self.phase * 1.3)) * 2
+        if self.cx <= l + self.w / 2 or self.cx >= r - self.w / 2:
+            self.drift = -self.drift
+            self.cx = min(max(self.cx, l + self.w / 2), r - self.w / 2)
+        if self.now > self.until:
+            self.emote("ex", 0.8)
+            self.vx, self.vy = self.drift * 0.6, 0.0
+            self.spin = 0.0                                  # 떨어지면서 휙 바로 서기
+            self.state = "air"
+            self.log("ceiling_drop")
+
+    # ───── 술래잡기 ─────
+    def start_tag(self):
+        mates = [o for o in self._others if o is not self and o.on == self.on and o.state in FREE_STATES
+                 and o.state != "sleep" and o.train is None and o.snack is None and abs(o.cx - self.cx) < 900]
+        if not mates:
+            return False
+        o = self.rng.choice(mates)
+        self.tag, o.tag = o, self
+        self.angle = o.angle = 0.0
+        self.flat = o.flat = 0.0
+        self.set_state("chase_pet", 6, 10)
+        o.now = self.now
+        o.set_state("flee", 6, 10)
+        o.until = self.until
+        self.say(self.rng.choice(["잡아라~!", "거기 서!", "술래다~"]), 2.2)
+        o.emote("ex", 0.9)
+        o.say(self.rng.choice(["으악!", "못 잡지롱~", "도망가자!"]), 2.0)
+        return True
+
+    def s_chase_pet(self, area, ground, mouse, others):
+        o = self.tag
+        if o is None or o.tag is not self or o.state != "flee" or o.on != self.on:
+            self.tag = None
+            if self.rng.random() < 0.5:
+                self.say(self.rng.choice(["에잇!", "놓쳤다…"]), 1.8)
+            self.set_state("look", 1, 2)
+            return
+        dx = o.cx - self.cx
+        self.facing = 1 if dx > 0 else -1
+        self.cx += self.facing * min(abs(dx), 4.4)
+        self.phase += 0.25
+        self.bob = abs(math.sin(self.phase * 1.6)) * 6
+        if abs(dx) < (self.w + o.w) / 2 * 0.95:
+            self.say("잡았다!", 2.0)
+            o.emote("ex", 0.8)
+            o.say(self.rng.choice(["잡혔다…", "히잉"]), 1.8)
+            for p in (self, o):
+                p.tag = None
+                p.hops_left = 2
+                p.set_state("happy", 1.2, 1.8)
+            return
+        if self.now > self.until:
+            self.tag = o.tag = None
+            self.say("헉헉…", 1.8)
+            self.flat = 0.12
+            self.set_state("sit", 2, 3)
+
+    def s_flee(self, area, ground, mouse, others):
+        l, t, r, b = area
+        c = self.tag
+        if c is None or c.tag is not self or c.state != "chase_pet" or self.now > self.until:
+            self.tag = None
+            self.set_state("idle", 0.8, 1.5)
+            return
+        away = 1 if self.cx >= c.cx else -1
+        self.facing = away
+        self.cx += away * 3.7
+        self.phase += 0.25
+        self.bob = abs(math.sin(self.phase * 1.6)) * 6
+        p = self.plats.get(self.on) if self.on is not None else None
+        lo, hi = (p[0], p[1]) if p is not None else (l, r)
+        if (away > 0 and self.cx >= hi - self.w * 0.7) or (away < 0 and self.cx <= lo + self.w * 0.7):
+            # 구석에 몰리면 술래 머리 위로 폴짝 넘어가기
+            self.facing = -away
+            self.tag = None
+            c.tag = None
+            self.jump(power=14)
+            self.vx = -away * 5.0
+            self.emote("note", 1.0)
 
     # ───── 창 위로 뛰어오르기 ─────
     def reach_x(self, p):
@@ -317,8 +535,20 @@ class PetBrain:
         self.bob = (math.sin(self.phase) + 1) * 1.0
         self.look_at_mouse(mouse)
         self.try_meet(others)
+        if self.state != "idle":
+            return
+        if self.crowded() and self.rng.random() < 0.015:  # 너무 붙어 있으면 슬슬 다른 데로
+            self.target_x = self.pick_spot()
+            self.facing = 1 if self.target_x > self.cx else -1
+            self.speed = self.rng.uniform(1.0, 1.8)
+            self.set_state("walk", 4, 10)
+            return
         if self.now > self.until:
             self.choose_next(mouse)
+
+    def crowded(self):
+        return any(o is not self and o.on == self.on and abs(o.cx - self.cx) < (o.w + self.w) * 0.75
+                   and abs(o.cy - self.cy) < self.h for o in self._others)
 
     def s_sit(self, area, ground, mouse, others):
         self.bob = (math.sin(self.phase * 0.6) + 1) * 0.6
@@ -338,6 +568,13 @@ class PetBrain:
     def s_walk(self, area, ground, mouse, others):
         l, t, r, b = area
         fast = self.state == "run"
+        if self.target_x is not None:
+            d = self.target_x - self.cx
+            if abs(d) <= self.speed:
+                self.target_x = None
+                self.set_state("idle", 0.8, 2.5) if self.rng.random() < 0.6 else self.choose_next(mouse)
+                return
+            self.facing = 1 if d > 0 else -1
         self.cx += self.facing * self.speed
         self.phase += 0.25 if fast else 0.14
         self.bob = abs(math.sin(self.phase * (1.6 if fast else 1.2))) * (6 if fast else 4)
@@ -440,7 +677,7 @@ class PetBrain:
             self.wall = -1 if self.cx <= edge_l else 1
             self.cx = (l + self.h / 2) if self.wall < 0 else (r - self.h / 2)
             self.angle = 90 * self.wall * -1        # 발이 벽 쪽을 향하도록
-            self.target = self.rng.uniform(t + self.w, ground - self.w)
+            self.target = t + self.w / 2 if self.rng.random() < 0.4 else self.rng.uniform(t + self.w, ground - self.w)
             self.speed = self.rng.uniform(1.0, 1.8)
             self.state = "climb"
             self.log("climb")
@@ -453,6 +690,14 @@ class PetBrain:
         self.phase += 0.2
         self.bob = abs(math.sin(self.phase * 1.3)) * 3
         if self.cy <= self.target or self.cy <= t + self.w / 2:
+            if self.cy <= t + self.w / 2 + 2 and self.rng.random() < 0.65:
+                # 꼭대기에 닿으면 거꾸로 매달려 천장을 걸어감
+                self.drift = -self.wall * self.rng.uniform(1.2, 2.0)
+                self.cx = (l + self.w / 2 + 2) if self.wall < 0 else (r - self.w / 2 - 2)
+                self.wall = 0
+                self.set_state("ceiling", 4, 9)
+                self.say(self.rng.choice(["거꾸로 세상~", "천장 산책!", "어지러워~"]), 2.2) if self.rng.random() < 0.5 else None
+                return
             self.set_state("hang", 1, 3)
 
     def s_hang(self, area, ground, mouse, others):
@@ -606,6 +851,8 @@ class PetBrain:
             self.emote("heart")
 
     def start_drag(self):
+        self.tag = None
+        self.target_x = None
         self.state = "drag"
         self.flat = 0
         self.wall = 0
