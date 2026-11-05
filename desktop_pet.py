@@ -318,6 +318,8 @@ class PetWindow(QWidget):
                b.bubble[0] if b.bubble else None, tuple(int(o) for o in self.part_off),
                int(b.phase * 6) if b.state == "balloon" else None)
         if key != self._key:
+            if b.bubble and (self._key is None or self._key[7] != b.bubble[0]):
+                self.raise_()                        # 말하는 펫을 맨 앞으로 (옆 펫에 말풍선이 안 가리게)
             self._key = key
             self.update()
 
@@ -383,6 +385,8 @@ class PetWindow(QWidget):
                 pop = 1.0 + 0.15 * max(0.0, 1 - k * 5)         # 처음에 살짝 뿅
             y = head_y - 4 - k * 20
             x = cx + dx + (math.sin(k * 9) * 3 if text in ("z", "♪") else 0)
+            if b.bubble:                             # 말풍선이 있으면 이모티콘은 옆으로 비켜서
+                x += w * 0.42 if dx >= 0 else -w * 0.42
             emoji = text in ("💦", "💢", "🎉")
             word = any("가" <= ch <= "힣" for ch in text)     # 한글 글자는 귀여운 글꼴로 작게
             if text == "z":
@@ -415,7 +419,7 @@ class PetWindow(QWidget):
     def draw_bubble(self, p, text, cx, head_y):
         p.setFont(BUBBLE_FONT)
         fm = p.fontMetrics()
-        max_w = self.width() - 18                    # 길면 ... 대신 줄을 바꿔서 전부 보여 줌
+        max_w = min(self.width() - 18, 112)          # 길면 ... 대신 줄을 바꿔서 전부 보여 줌 (옆 펫과 덜 겹치게 좁게)
         box = fm.boundingRect(QRect(0, 0, max_w, 200), Qt.TextWordWrap | Qt.AlignCenter, text)
         tw, th = box.width(), box.height()
         bw, bh = tw + 14, th + 6
