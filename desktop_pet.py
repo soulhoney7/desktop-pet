@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QAbstractNativeEventFilter, QLockFile, QPoint, QPointF, QRectF, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QAbstractNativeEventFilter, QLockFile, QPoint, QPointF, QRect, QRectF, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QPainterPath, QPen, QCursor, QFont, QGuiApplication, QIcon, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, 
@@ -78,10 +78,10 @@ def init_emote_style():
     EMO_COLORS.update({"♥": QColor(240, 80, 120), "♪": QColor(90, 120, 230), "★": QColor(250, 190, 30),
                        "!": QColor(235, 70, 60), "?": QColor(80, 140, 230), "z": QColor(120, 120, 160),
                        "콩!": QColor(255, 105, 150), "뿅!": QColor(160, 110, 240)})
-    EMO_FONTS["small"] = QFont("Segoe UI Symbol", 9, QFont.Bold)
+    EMO_FONTS["small"] = QFont("Segoe UI Symbol", 7, QFont.Bold)
     global BUBBLE_FONT, CUTE_FONT
     CUTE_FONT = load_cute_font()
-    BUBBLE_FONT = QFont(CUTE_FONT, 10)
+    BUBBLE_FONT = QFont(CUTE_FONT, 9)
     EMO_COLORS.update({"펑!": QColor(255, 140, 60)})
     EMO_COLORS.update({"냠": QColor(240, 130, 60), "하암": QColor(140, 130, 170)})
 
@@ -380,17 +380,17 @@ class PetWindow(QWidget):
             alpha = int(255 * (1 - max(0, k - 0.6) / 0.4))
             pop = 1.0
             if text in ("콩!", "뿅!", "펑!"):
-                pop = 1.0 + 0.25 * max(0.0, 1 - k * 5)         # 처음에 살짝 뿅
-            y = head_y - 4 - k * 26
+                pop = 1.0 + 0.15 * max(0.0, 1 - k * 5)         # 처음에 살짝 뿅
+            y = head_y - 4 - k * 20
             x = cx + dx + (math.sin(k * 9) * 3 if text in ("z", "♪") else 0)
             emoji = text in ("💦", "💢", "🎉")
             word = any("가" <= ch <= "힣" for ch in text)     # 한글 글자는 귀여운 글꼴로 작게
             if text == "z":
-                size = int(8 + k * 5)
+                size = int(6 + k * 4)
             elif word:
-                size = int(12 * pop)
+                size = max(7, int(8 * pop))
             else:
-                size = int(12 * pop)
+                size = max(7, int(9 * pop))
             if emoji:
                 font = QFont("Segoe UI Emoji", size)
             elif word or text in ("z", "!", "?"):
@@ -415,9 +415,10 @@ class PetWindow(QWidget):
     def draw_bubble(self, p, text, cx, head_y):
         p.setFont(BUBBLE_FONT)
         fm = p.fontMetrics()
-        tw = min(fm.horizontalAdvance(text), self.width() - 22)
-        text = fm.elidedText(text, Qt.ElideRight, tw + 1)
-        bw, bh = tw + 16, fm.height() + 8
+        max_w = self.width() - 18                    # 길면 ... 대신 줄을 바꿔서 전부 보여 줌
+        box = fm.boundingRect(QRect(0, 0, max_w, 200), Qt.TextWordWrap | Qt.AlignCenter, text)
+        tw, th = box.width(), box.height()
+        bw, bh = tw + 14, th + 6
         x = max(2, min(self.width() - bw - 2, cx - bw / 2))
         y = max(2, head_y - bh - 12)
         p.setPen(QColor(240, 98, 146))
@@ -430,7 +431,7 @@ class PetWindow(QWidget):
         p.drawLine(QPointF(tail_x - 6, y + bh), QPointF(tail_x, y + bh + 7))
         p.drawLine(QPointF(tail_x + 6, y + bh), QPointF(tail_x, y + bh + 7))
         p.setPen(QColor(70, 60, 70))
-        p.drawText(QRectF(x, y, bw, bh), Qt.AlignCenter, text)
+        p.drawText(QRectF(x, y, bw, bh), Qt.AlignCenter | Qt.TextWordWrap, text)
 
     # ── 마우스 ──
     def mousePressEvent(self, e):
@@ -1010,6 +1011,7 @@ class PetApp:
         self.key_filter = RawKeyFilter(self.on_raw_key)
         qapp.installNativeEventFilter(self.key_filter)
         self.key_log("raw_input_registered=%s" % self.raw_ok)
+        self.key_log("font=%s" % CUTE_FONT)
         self.timer = QTimer()
         self.timer.setTimerType(Qt.CoarseTimer)    # 정밀 타이머보다 전력/CPU를 덜 씀
         self.timer.timeout.connect(self.tick)
@@ -1394,6 +1396,14 @@ class PetApp:
                     if b.state == "sleep":
                         b.set_state("idle", 99, 99)
             QTimer.singleShot(1500, wake)
+        elif what == "text":
+            lines = ["퇴근 10분 전! 슬슬 정리해요~", "오늘도 고생 많았어요 ♥", "50분 지났어요! 잠깐 쉬어요 ☕", "같이 놀 친구가 없어…"]
+            for k, p in enumerate(self.pets.values()):
+                b = p.brain
+                b.set_state("idle", 20, 20)
+                b.say(lines[k % len(lines)], 15)
+                b.emote("bonk", 15)
+                b.emote("heart", 15)
         elif what == "moves":
             names = sorted(self.pets)
             brains = [self.pets[n].brain for n in names]

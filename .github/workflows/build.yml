@@ -50,6 +50,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "배경 제거 시험 실패" }
 
       - name: 가벼움 측정 (이전 버전과 비교)
+        if: contains(github.event.head_commit.message, '[녹화]')
         continue-on-error: true
         shell: pwsh
         env:
@@ -66,6 +67,7 @@ jobs:
           pwsh -File ci/measure.ps1 -exe dist\DesktopPet.exe -label "새 버전" -out shots/측정.txt
 
       - name: 장면 녹화 (부딪힘, 기차, 간식, 퇴근임박, 퇴근)
+        if: contains(github.event.head_commit.message, '[녹화]')
         continue-on-error: true
         shell: pwsh
         run: |
@@ -113,6 +115,29 @@ jobs:
           if (Test-Path "$env:APPDATA\DesktopPet\keys_debug.txt") { Copy-Item "$env:APPDATA\DesktopPet\keys_debug.txt" shots\ }
           Get-Process DesktopPet -ErrorAction SilentlyContinue | Stop-Process -Force
           Start-Sleep 3
+          Remove-Item "$env:APPDATA\DesktopPet\running.lock" -ErrorAction SilentlyContinue
+
+      - name: 글씨·말풍선 확인 (짧게)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force shots | Out-Null
+          python ci/make_group_pet.py shots/0_여러마리_한펫.png
+          New-Item -ItemType Directory -Force "$env:APPDATA\DesktopPet\pets" | Out-Null
+          Copy-Item ci\pets\*.png "$env:APPDATA\DesktopPet\pets"
+          '{"global_scale": 120, "pets": {}, "help_shown": true}' | Set-Content "$env:APPDATA\DesktopPet\settings.json" -Encoding utf8
+          Get-Process DesktopPet -ErrorAction SilentlyContinue | Stop-Process -Force
+          Remove-Item "$env:APPDATA\DesktopPet\running.lock" -ErrorAction SilentlyContinue
+          $env:DESKTOPPET_DEMO = "1"
+          $null = Start-Process dist\DesktopPet.exe -PassThru
+          Start-Sleep 22
+          Set-Content "$env:APPDATA\DesktopPet\demo_go" "text" -Encoding utf8 -NoNewline
+          Start-Sleep 2
+          python ci/shot.py shots/20_글씨_말풍선.png
+          if (Test-Path "$env:APPDATA\DesktopPet\keys_debug.txt") { Copy-Item "$env:APPDATA\DesktopPet\keys_debug.txt" shots\ }
+          if (Test-Path "$env:APPDATA\DesktopPet\error.log") { Copy-Item "$env:APPDATA\DesktopPet\error.log" shots\error_text.log }
+          Get-Process DesktopPet -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep 2
           Remove-Item "$env:APPDATA\DesktopPet\running.lock" -ErrorAction SilentlyContinue
 
       - name: exe 실행 시험 + 화면 캡처
